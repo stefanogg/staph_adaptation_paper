@@ -1,0 +1,871 @@
+---
+title: "Calculate Jaccard index between episodes: all neb genes"
+author: "Stefano Giulieri"
+date: "21/10/2021"
+output: html_document
+---
+
+Here, we calculate the Jaccard index between pairs of independent episodes. We perform the analysis for the entire dataset and then separating according to the class of variant.
+
+The Jaccard (similarity) index is (intersection over union) is defined as size of intersection divided by size of union of two sets.
+
+The formal notation is $Jaccard(A, B) = (A \cap B) / (A \cup B)$
+
+Note that we restrict to all genes in the GSEA.
+
+```{r setup, include=F}
+knitr::opts_chunk$set(echo = TRUE)
+setwd(stringr::str_c(here::here(), "/Updated_analysis_with_CAMERA2"))
+msg <- glue::glue("My directory is {getwd()}")
+message(msg)
+```
+
+```{r message=F}
+library(tidyverse)
+library(tidygraph)
+library(ggraph)
+library(patchwork)
+rm(list = ls())
+```
+
+# Raw data
+
+Combined annotation database
+
+```{r}
+df_gsea_neb_with_mutations <- readRDS("processed_data/gene_convergence/df_gsea_neb_with_mutations.Rda")
+```
+
+
+Annotation with clinical data
+
+```{r}
+df_clinical <- readRDS("../Dashboard/processed_data/clinical_data/extendend_clinical_data.Rda") %>%
+  rename(name = episode_id)
+```
+
+Keep protein-changing mutations only and optional removal of non/FPR3757 homologs
+
+```{r}
+# Keep significant genes only
+df_genes <- df_gsea_neb_with_mutations %>%
+  distinct(neb_gene_symbol, mutation_compartment, glm.pval) %>%
+  dplyr::group_by(mutation_compartment) %>%
+  slice_min(glm.pval, n = 20, with_ties = F)
+
+df_mutated_genes <- df_gsea_neb_with_mutations %>%
+  # semi_join(df_genes) %>%
+  ungroup() %>%
+  distinct(patient_episode_unique, mutation_compartment, neb_gene_symbol) 
+```
+
+
+# By compartment
+
+```{r}
+df_mutated_genes <- df_mutated_genes %>%
+  filter(mutation_compartment != "all") 
+
+list_df <- list()
+
+for (my_compart in unique(str_subset(df_mutated_genes$mutation_compartment, "all", negate = T))){
+  df <- df_mutated_genes %>%
+    filter(mutation_compartment == my_compart)
+  
+  x <- df %>%
+    .$patient_episode_unique %>%
+    unique()
+
+m_pairs <- combn(x = x, 
+               m = 2,
+               simplify = T) 
+
+
+m_pairs <- t(m_pairs)
+
+
+
+jaccard <- c()
+
+for (i in 1:nrow(m_pairs)){
+  id1 <- m_pairs[i, 1]
+  id2 <- m_pairs[i, 2]
+  
+  a <- df %>%
+    filter(patient_episode_unique == id1) %>%
+    .$neb_gene_symbol %>%
+    unique()
+  
+  # a <- a[which(a %in% df_genes$neb_gene_symbol)]
+  
+  # print("a is:")
+  # print(a)
+  
+  
+   b <- df %>%
+    filter(patient_episode_unique == id2) %>%
+    .$neb_gene_symbol %>%
+    unique()
+   
+# b <- b[which(b %in% df_genes$neb_gene_symbol)]
+  
+# print("b is :")
+# print(b)
+   
+   intersect <- intersect(a, b)
+   
+  # print("intersect is:")
+  # print(intersect)
+   union <- union(a, b)
+   
+   # print("union is:")
+   # print(union)
+   
+   j <- length(intersect)/length(union)
+   
+   jaccard[i] <- j
+}
+
+list_df[[my_compart]] <- as_tibble(m_pairs) %>%
+  mutate(jaccard = jaccard) %>%
+  mutate(mutation_compartment = my_compart) %>%
+  rename(id1 = V1, id2 = V2)
+}
+
+df_jaccard_compart <- bind_rows(list_df)
+```
+
+# Summarise jaccard values
+
+```{r}
+df_jaccard1 <- df_jaccard_compart %>%
+  select(name = id1, jaccard, mutation_compartment)
+df_jaccard2 <- df_jaccard_compart %>%
+  select(name = id2, jaccard, mutation_compartment)
+
+df_jaccard <- bind_rows(df_jaccard1, df_jaccard2) %>%
+  dplyr::group_by(name, mutation_compartment) %>%
+  summarise(mean_jaccard = mean(jaccard, na.rm = T) )
+
+df_jaccard %>%
+  ggplot(aes(x = mutation_compartment, y = mean_jaccard)) +
+ geom_violin() +
+  theme_bw()
+  
+```
+
+
+# Plot as network
+
+## Here we construct the network object
+
+```{r}
+jaccard_net <- as_tbl_graph(df_jaccard_compart, from = id1, to = id2, directed = F)
+
+jaccard_net <- jaccard_net %>%
+  activate(edges) %>%
+  filter(jaccard > 0)
+```
+
+## # Add clinical variables
+
+```{r}
+jaccard_net <- jaccard_net %>%
+  activate(nodes) %>%
+  left_join(df_clinical)
+  
+```
+
+## Plot all
+
+```{r}
+ggraph(jaccard_net, layout = "nicely") +
+  geom_edge_link(aes(colour = mutation_compartment, edge_width = jaccard)) +
+  geom_node_point(aes(size = centrality_betweenness(directed = F)), shape = 21) +
+  scale_alpha_continuous(guide = F) +
+  scale_size_continuous(name = "Centrality (~number of connections)") +
+  scale_edge_color_manual(values = c("#fdae61", "#abd9e9", "black")) +
+  theme_graph()
+```
+
+## Plot by compartment
+
+```{r}
+for (m in unique(df_jaccard_compart$mutation_compartment)){
+  
+  net <- jaccard_net %>%
+  activate(edges) %>%
+  filter(mutation_compartment == m)
+  
+  p <- ggraph(net, layout = "nicely") +
+  geom_edge_link(aes(colour = jaccard)) +
+  geom_node_point(aes(size = centrality_betweenness(directed = F))) +
+    # geom_node_point(aes(size = centrality_degree())) +
+  scale_size_continuous(name = "Centrality (~number of connections)") +
+    scale_edge_color_viridis() +
+    labs(title = m) +
+  theme_graph()
+  
+  print(p)
+}
+```
+
+## Overlay clinical data
+
+# TII
+
+```{r}
+net <- jaccard_net %>%
+  activate(edges) %>%
+  filter(mutation_compartment == "invasive-invasive")
+
+net <- net %>%
+  activate(nodes) %>%
+  filter(!is.na(invasive_sites))
+
+ p1 <- ggraph(net, layout = "nicely") +
+  geom_edge_link(aes(width = jaccard)) +
+  # geom_node_point(aes(size = centrality_betweenness(directed = F),
+  #                     colour = as.factor(endo_diag))) +
+    geom_node_point(aes(size = centrality_degree(),
+                        colour = as.factor(invasive_group))) +
+  scale_size_continuous(name = "Centrality (~number of connections)") +
+    scale_edge_color_viridis() +
+   # scale_color_brewer() +
+   scale_color_discrete(type = oneclust::cud(), na.translate = F) +
+    labs(title = "TII mutations: clinical syndrome") +
+  theme_graph()
+  
+  print(p1)
+  
+df_centrality <- net %>%
+  activate(nodes) %>%
+  mutate(centrality_b = centrality_betweenness(directed = F)) %>%
+  mutate(centrality_d = centrality_degree()) %>%
+  as_tibble() %>%
+  pivot_longer(cols = starts_with("centrality"),
+               names_to = "centrality_type", 
+               values_to = "centrality_value")
+
+df_centrality %>%
+  drop_na(invasive_group) %>%
+  ggplot(aes(x = centrality_value, fill = invasive_group)) +
+  geom_density(alpha = .6) +
+  # geom_histogram() +
+  facet_wrap(invasive_group~centrality_type, scales = "free") +
+  scale_fill_discrete(type = oneclust::cud(), na.translate = F, guide = "none") +
+  # scale_fill_brewer(na.translate = F, guide = "none") +
+  theme_bw()
+
+df_mutations <- df_gsea_neb_with_mutations %>%
+  drop_na(patient_episode_unique) %>%
+  filter(mutation_compartment == "invasive-invasive") %>%
+  semi_join(df_genes) %>%
+  left_join(df_clinical, by = c("patient_episode_unique" = "name")) 
+
+df_plot <- df_mutations %>%
+  mutate(neb_gene_symbol = fct_reorder(neb_gene_symbol, glm.pval)) %>%
+  dplyr::group_by(mutation_compartment, invasive_group, neb_gene_symbol, glm.pval, EFFTYPE_SHORT) %>%
+  summarise(n_events = n_distinct(patient_episode_unique)) 
+
+# df_plot %>%
+#   ggplot(aes(x = fct_reorder(neb_gene_symbol, glm.pval), y = n_events, fill = EFFTYPE_SHORT)) +
+#   geom_bar(stat = "identity") +
+#   facet_wrap(~invasive_group) +
+#   coord_flip() +
+#   theme_bw()
+
+df_plot <- df_plot %>%
+  ungroup() %>%
+  select(invasive_group, neb_gene_symbol, n_events) %>%
+  tidyr::complete(neb_gene_symbol, invasive_group, fill = list(n_events = 0))
+
+
+
+df_plot %>%
+  ggplot(aes(x = invasive_group, y = fct_rev(neb_gene_symbol), fill = n_events)) +
+  geom_tile() +
+  scale_x_discrete(position = "top", name = "") +
+  scale_y_discrete(name = "") +
+  scale_fill_gradient2(low = "blue", high = "red", midpoint = 0) +
+  theme_bw()
+  
+```
+
+## Assess impact of duration of bacteaemia
+
+```{r}
+ p1 <- ggraph(net, layout = "nicely") +
+  geom_edge_link(aes(colour = jaccard)) +
+  # geom_node_point(aes(size = centrality_betweenness(directed = F),
+  #                     colour = sab_duration)) +
+    geom_node_point(aes(size = centrality_degree(),
+                        colour = sab_duration)) +
+  scale_size_continuous(name = "Centrality (~number of connections)") +
+    scale_edge_color_viridis() +
+    labs(title = "TII mutations: duration of bacteraemia") +
+  theme_graph()
+  
+  print(p1)
+  
+
+
+df_centrality %>%
+  drop_na(sab_duration) %>%
+  ggplot(aes(x = sab_duration, y = centrality_value)) +
+  geom_point() +
+  facet_wrap(~centrality_type, scales = "free_y") +
+  theme_bw()
+
+df_centrality %>%
+   drop_na(sab_duration) %>%
+  ggplot(aes(x = centrality_value, fill = as.factor(sab_duration >= 7))) +
+  geom_density(alpha = .6) +
+  scale_fill_manual(values = c("blue", "red"), na.translate = F, name = "Bacteraemia >= 7 days", labels = c("No", "Yes")) +
+   facet_wrap(~centrality_type, scales = "free_y") +
+  theme_bw()
+  theme_bw()
+```
+
+## Loop over all binary variables
+
+```{r}
+var <- df_clinical %>%
+  select(bacteraemia:neuro, pulmo, implant) %>%
+  colnames()
+
+for (v in var){
+  
+  s <- rlang::sym(v)
+   
+  p1 <- ggraph(net, layout = "nicely") +
+  geom_edge_link(aes(colour = jaccard)) +
+  # geom_node_point(aes(size = centrality_betweenness(directed = F),
+  #                     colour = as.factor({{s}}))) +
+    geom_node_point(aes(size = centrality_degree(),
+                        colour = as.factor({{s}}))) +
+  scale_size_continuous(name = "Centrality (~number of connections)") +
+    scale_edge_color_viridis() +
+   scale_color_manual(values = c("blue", "red")) +
+    labs(title = str_c("TII mutations: ", v)) +
+  theme_graph()
+  
+  # print(p1)
+  # 
+p2 <- df_centrality %>%
+  ggplot(aes(x = centrality, fill = as.factor({{s}}))) +
+  geom_density(alpha = .6) +
+  scale_fill_manual(values = c("blue", "red"), na.translate = F, name = v, labels = c("No", "Yes")) +
+  theme_bw()
+
+
+
+df_plot <- df_mutations %>%
+  dplyr::group_by(mutation_compartment, {{s}}, neb_gene_symbol, glm.pval, EFFTYPE_SHORT) %>%
+  summarise(n_events = n_distinct(patient_episode_unique))
+
+# p3 <- df_plot %>%
+#   ggplot(aes(x = fct_reorder(neb_gene_symbol, glm.pval), y = n_events, fill = EFFTYPE_SHORT)) +
+#   geom_bar(stat = "identity") +
+#   facet_wrap(~as.factor({{s}})) +
+#   coord_flip() +
+#   theme_bw()
+# 
+# p <- p1 + (p2 / p3)
+# 
+# print(p)
+
+p <- p1 / p2
+
+# p <- p1 +( p2 / p3)
+
+print(p)
+
+}
+```
+
+## Construct the final figure for TII
+
+```{r}
+# Panel A: network
+ p1 <- ggraph(net, layout = "nicely") +
+  geom_edge_link(aes(width = jaccard)) +
+    geom_node_point(aes(size = centrality_degree(),
+                        colour = as.factor(invasive_group))) +
+  scale_size_continuous(name = "Centrality (~number of connections)") +
+    scale_edge_color_viridis() +
+   # scale_color_brewer() +
+   scale_color_discrete(type = oneclust::cud(), na.translate = F) +
+    labs(title = "TII mutations: clinical syndrome") +
+  theme_graph()
+  
+p1
+
+# Panel B: centrality measures
+p2 <- df_centrality %>%
+  filter(centrality_type == "centrality_d") %>%
+  ggplot(aes(x = centrality_value, fill = invasive_group)) +
+  geom_density(alpha = .6)  +
+  scale_fill_discrete(type = oneclust::cud(), na.translate = F) +
+  theme_bw()
+
+p2
+
+df_plot <- df_centrality %>%
+  drop_na(invasive_group) %>%
+  filter(centrality_type == "centrality_d") %>%
+  mutate(adaptive = centrality_value > 0) %>%
+  count(invasive_group, adaptive) %>%
+  dplyr::group_by(invasive_group) %>%
+  mutate(frac = n/sum(n)) %>%
+  mutate(frac_adaptive = frac[which(adaptive)])
+
+p3 <- df_plot %>%
+  filter(adaptive) %>%
+  ungroup() %>%
+  ggplot(aes(x = fct_reorder(invasive_group, frac_adaptive), y = frac,
+             size = n, 
+             colour = invasive_group)) +
+  geom_point() +
+  scale_x_discrete(name = "") +
+  scale_y_continuous(name = "Proportion of episodes") +
+   scale_colour_discrete(type = oneclust::cud(), na.translate = F, guide = "none") +
+  scale_size_continuous(name = "Number of adaptive episodes") +
+  coord_flip() +
+  theme_bw()
+
+p3
+
+
+
+# Panel C: mutated genes
+df_plot <- df_mutations %>%
+  mutate(neb_gene_symbol = fct_reorder(neb_gene_symbol, glm.pval)) %>%
+  dplyr::group_by(mutation_compartment, invasive_group, neb_gene_symbol, glm.pval, EFFTYPE_SHORT) %>%
+  summarise(n_events = n_distinct(patient_episode_unique)) 
+
+df_plot <- df_plot %>%
+  ungroup() %>%
+  select(invasive_group, neb_gene_symbol, n_events) %>%
+  tidyr::complete(neb_gene_symbol, invasive_group, fill = list(n_events = 0))
+
+p4 <- df_plot %>%
+  ggplot(aes(x = invasive_group, y = fct_rev(neb_gene_symbol), fill = n_events)) +
+  geom_tile() +
+  scale_x_discrete(position = "top", name = "", labels = ~ str_wrap(., 15)) +
+  scale_y_discrete(name = "") +
+  scale_fill_gradient2(low = "blue", high = "red", midpoint = 0) +
+  theme_bw() 
+p4
+
+# Combine 
+p5 <- p2 / p3
+p6 <- wrap_plots(p5, p4, nrow = 1) +
+  plot_layout(guides = "collect")
+p6
+```
+
+
+# TCC
+
+```{r}
+net <- jaccard_net %>%
+  activate(edges) %>%
+  filter(mutation_compartment == "colonising-colonising")
+
+net <- jaccard_net %>%
+  activate(nodes) %>%
+  filter(!is.na(colonising_sites))
+
+ p1 <- ggraph(net, layout = "nicely") +
+  geom_edge_link(aes(colour = jaccard)) +
+  geom_node_point(aes(size = centrality_betweenness(directed = F),
+                      colour = colonising_group)) +
+    geom_node_point(aes(size = centrality_degree(),
+                        colour = colonising_group)) +
+  scale_size_continuous(name = "Centrality (~number of connections)") +
+    scale_edge_color_viridis() +
+   scale_color_discrete(type = oneclust::cud()) +
+    labs(title = "TCC mutations: CF") +
+  theme_graph()
+  
+  print(p1)
+  
+df_centrality <- net %>%
+  activate(nodes) %>%
+  mutate(centrality_b = centrality_betweenness(directed = F)) %>%
+  mutate(centrality_d = centrality_degree()) %>%
+  as_tibble() %>%
+  pivot_longer(cols = starts_with("centrality"),
+               names_to = "centrality_type", 
+               values_to = "centrality_value")
+
+df_centrality %>%
+  drop_na(colonising_group) %>%
+  ggplot(aes(x = centrality_value, fill = colonising_group)) +
+  geom_density(alpha = .6) +
+  # geom_histogram() +
+  facet_wrap(colonising_group~centrality_type, scales = "free") +
+  scale_fill_discrete(type = oneclust::cud(), na.translate = F, guide = "none") +
+  # scale_fill_brewer(na.translate = F, guide = "none") +
+  theme_bw()
+
+df_mutations <- df_gsea_neb_with_mutations %>%
+  drop_na(patient_episode_unique) %>%
+  filter(mutation_compartment == "colonising-colonising") %>%
+  semi_join(df_genes) %>%
+  left_join(df_clinical, by = c("patient_episode_unique" = "name")) 
+
+df_plot <- df_mutations %>%
+  mutate(neb_gene_symbol = fct_reorder(neb_gene_symbol, glm.pval)) %>%
+  dplyr::group_by(mutation_compartment, colonising_group, neb_gene_symbol, glm.pval, EFFTYPE_SHORT) %>%
+  summarise(n_events = n_distinct(patient_episode_unique)) 
+
+# df_plot %>%
+#   ggplot(aes(x = fct_reorder(neb_gene_symbol, glm.pval), y = n_events, fill = EFFTYPE_SHORT)) +
+#   geom_bar(stat = "identity") +
+#   facet_wrap(~invasive_group) +
+#   coord_flip() +
+#   theme_bw()
+
+df_plot <- df_plot %>%
+  ungroup() %>%
+  select(colonising_group, neb_gene_symbol, n_events) %>%
+  tidyr::complete(neb_gene_symbol, invasive_group, fill = list(n_events = 0))
+
+
+
+df_plot %>%
+  ggplot(aes(x = colonising_group, y = fct_rev(neb_gene_symbol), fill = n_events)) +
+  geom_tile() +
+  scale_x_discrete(position = "top", name = "") +
+  scale_y_discrete(name = "") +
+  scale_fill_gradient2(low = "red", high = "blue", midpoint = 0) +
+  theme_bw()
+```
+
+## Construct the final figure for TCC
+
+```{r}
+# Panel A: network
+ p1 <- ggraph(net, layout = "nicely") +
+  geom_edge_link(aes(width = jaccard)) +
+    geom_node_point(aes(size = centrality_degree(),
+                        colour = as.factor(colonising_group))) +
+  scale_size_continuous(name = "Centrality (~number of connections)") +
+    scale_edge_color_viridis() +
+   ggsci::scale_color_tron(na.translate = F, name = "") +
+    labs(title = "TCC mutations") +
+  theme_graph()
+  
+p1
+
+# Panel B: centrality measures
+p2 <- df_centrality %>%
+  filter(centrality_type == "centrality_d") %>%
+  ggplot(aes(x = centrality_value, fill = colonising_group)) +
+  geom_density(alpha = .6)  +
+ ggsci::scale_fill_tron(na.translate = F, name = "") +
+  theme_bw()
+
+p2
+
+df_plot <- df_centrality %>%
+  drop_na(colonising_group) %>%
+  filter(centrality_type == "centrality_d") %>%
+  mutate(adaptive = centrality_value > 0) %>%
+  count(colonising_group, adaptive) %>%
+  dplyr::group_by(colonising_group) %>%
+  mutate(frac = n/sum(n)) %>%
+  mutate(frac_adaptive = frac[which(adaptive)])
+
+p3 <- df_plot %>%
+  filter(adaptive) %>%
+  ungroup() %>%
+  ggplot(aes(x = fct_reorder(colonising_group, frac_adaptive), y = frac,
+             size = n, 
+             colour = colonising_group)) +
+  geom_point() +
+  scale_x_discrete(name = "") +
+  scale_y_continuous(name = "Proportion of episodes") +
+  ggsci::scale_color_tron(na.translate = F, guide = "none") +
+  scale_size_continuous(name = "Number of adaptive episodes") +
+  coord_flip() +
+  theme_bw()
+
+p3
+
+
+
+# Panel C: mutated genes
+df_plot <- df_mutations %>%
+  mutate(neb_gene_symbol = fct_reorder(neb_gene_symbol, glm.pval)) %>%
+  dplyr::group_by(mutation_compartment, colonising_group, neb_gene_symbol, glm.pval, EFFTYPE_SHORT) %>%
+  summarise(n_events = n_distinct(patient_episode_unique)) 
+
+df_plot <- df_plot %>%
+  ungroup() %>%
+  select(colonising_group, neb_gene_symbol, n_events) %>%
+  tidyr::complete(neb_gene_symbol, colonising_group, fill = list(n_events = 0))
+
+p4 <- df_plot %>%
+  ggplot(aes(x = fct_relevel(colonising_group, c("atopic dermatitis")), y = fct_rev(neb_gene_symbol), fill = n_events)) +
+  geom_tile() +
+  scale_x_discrete(position = "top", name = "", labels = ~ str_wrap(., 15)) +
+  scale_y_discrete(name = "") +
+  scale_fill_gradient2(low = "red", high = "blue", midpoint = 0) +
+  theme_bw() 
+p4
+
+# Combine 
+p5 <- p2 / p3
+p7 <- wrap_plots(p5, p4, nrow = 1) +
+  plot_layout(guides = "collect")
+p7
+```
+
+# TCI
+
+```{r}
+net <- jaccard_net %>%
+  activate(edges) %>%
+  filter(mutation_compartment == "colonising-invasive")
+
+net <- net %>%
+  activate(nodes) %>%
+  filter(!is.na(colonising_sites) & !is.na(invasive_sites))
+
+ p1 <- ggraph(net, layout = "nicely") +
+  geom_edge_link(aes(width = jaccard)) +
+  # geom_node_point(aes(size = centrality_betweenness(directed = F),
+  #                     colour = as.factor(skin))) +
+    geom_node_point(aes(size = centrality_degree(),
+                        colour = invasive_group)) +
+  scale_size_continuous(name = "Centrality (~number of connections)") +
+    scale_edge_color_viridis() +
+  scale_colour_discrete(type = oneclust::cud(), na.translate = F) +
+    labs(title = "TCI mutations") +
+  theme_graph()
+  
+  print(p1)
+  
+df_centrality <- net %>%
+  activate(nodes) %>%
+  mutate(centrality_b = centrality_betweenness(directed = F)) %>%
+  mutate(centrality_d = centrality_degree()) %>%
+  as_tibble() %>%
+  pivot_longer(cols = starts_with("centrality"),
+               names_to = "centrality_type", 
+               values_to = "centrality_value")
+
+df_centrality %>%
+  drop_na(invasive_group) %>%
+  ggplot(aes(x = centrality_value, fill = invasive_group)) +
+  geom_density(alpha = .6) +
+  # geom_histogram() +
+  facet_wrap(invasive_group~centrality_type, scales = "free") +
+  scale_fill_discrete(type = oneclust::cud(), na.translate = F, guide = "none") +
+  # scale_fill_brewer(na.translate = F, guide = "none") +
+  theme_bw()
+
+for (c in unique(df_centrality$centrality_type)) {
+  p <- df_centrality %>%
+  drop_na(invasive_group) %>%
+    filter(centrality_type == c) %>%
+  ggplot(aes(x = centrality_value, fill = invasive_group)) +
+  geom_density(alpha = .6) +
+  # geom_histogram() +
+  facet_wrap(~invasive_group, nrow = 1) +
+  scale_fill_discrete(type = oneclust::cud(), na.translate = F, guide = "none") +
+    labs(title = c) +
+  # scale_fill_brewer(na.translate = F, guide = "none") +
+  theme_bw()
+  
+  print(p)
+}
+
+df_centrality %>%
+  ggplot(aes(x = invasive_group, fill = centrality_value > 0)) +
+  geom_bar(position = "dodge") +
+  facet_wrap(~centrality_type) +
+  coord_flip() +
+  theme_bw()
+
+df_mutations <- df_gsea_neb_with_mutations %>%
+  drop_na(patient_episode_unique) %>%
+  filter(mutation_compartment == "colonising-invasive") %>%
+  semi_join(df_genes) %>%
+  left_join(df_clinical, by = c("patient_episode_unique" = "name")) 
+
+df_plot <- df_mutations %>%
+  mutate(neb_gene_symbol = fct_reorder(neb_gene_symbol, glm.pval)) %>%
+  dplyr::group_by(mutation_compartment, invasive_group, neb_gene_symbol, glm.pval, EFFTYPE_SHORT) %>%
+  summarise(n_events = n_distinct(patient_episode_unique)) 
+
+# df_plot %>%
+#   ggplot(aes(x = fct_reorder(neb_gene_symbol, glm.pval), y = n_events, fill = EFFTYPE_SHORT)) +
+#   geom_bar(stat = "identity") +
+#   facet_wrap(~invasive_group) +
+#   coord_flip() +
+#   theme_bw()
+
+df_plot <- df_plot %>%
+  ungroup() %>%
+  select(invasive_group, neb_gene_symbol, n_events) %>%
+  tidyr::complete(neb_gene_symbol, invasive_group, fill = list(n_events = 0))
+
+
+
+df_plot %>%
+  ggplot(aes(x = invasive_group, y = fct_rev(neb_gene_symbol), fill = n_events)) +
+  geom_tile() +
+  scale_x_discrete(position = "top", name = "") +
+  scale_y_discrete(name = "") +
+  scale_fill_gradient2(low = "blue", high = "red", midpoint = 0) +
+  theme_bw()
+```
+
+# Loop over clinical variables
+
+```{r}
+var <- df_clinical %>%
+  select(bacteraemia:neuro, pulmo, implant) %>%
+  colnames()
+
+for (v in var){
+  
+  s <- rlang::sym(v)
+   
+  p1 <- ggraph(net, layout = "nicely") +
+  geom_edge_link(aes(colour = jaccard)) +
+  geom_node_point(aes(size = centrality_betweenness(directed = F),
+                      colour = as.factor({{s}}))) +
+    # geom_node_point(aes(size = centrality_degree())) +
+  scale_size_continuous(name = "Centrality (~number of connections)") +
+    scale_edge_color_viridis() +
+   scale_color_manual(values = c("blue", "red")) +
+    labs(title = str_c("TII mutations: ", v)) +
+  theme_graph()
+  
+  print(p1)
+  
+p2 <- df_centrality %>%
+  ggplot(aes(x = centrality, fill = as.factor({{s}}))) +
+  geom_density(alpha = .6) +
+  scale_fill_manual(values = c("blue", "red"), na.translate = F, name = v, labels = c("No", "Yes")) +
+  theme_bw()
+
+
+
+df_plot <- df_mutations %>%
+  dplyr::group_by(mutation_compartment, {{s}}, neb_gene_symbol, glm.pval, EFFTYPE_SHORT) %>%
+  summarise(n_events = n_distinct(patient_episode_unique))
+
+# p3 <- df_plot %>%
+#   ggplot(aes(x = fct_reorder(neb_gene_symbol, glm.pval), y = n_events, fill = EFFTYPE_SHORT)) +
+#   geom_bar(stat = "identity") +
+#   facet_wrap(~as.factor({{s}})) +
+#   coord_flip() +
+#   theme_bw()
+# 
+# p <- p1 + (p2 / p3)
+# 
+# print(p)
+
+p <- p1 / p2
+
+# p <- p1 +( p2 / p3)
+
+print(p)
+
+}
+```
+
+## Construct the final figure for TCI
+
+```{r}
+# Panel A: network
+ p1 <- ggraph(net, layout = "nicely") +
+  geom_edge_link(aes(width = jaccard)) +
+    geom_node_point(aes(size = centrality_degree(),
+                        colour = as.factor(invasive_group))) +
+  scale_size_continuous(name = "Centrality (~number of connections)") +
+    scale_edge_color_viridis() +
+   # scale_color_brewer() +
+   scale_color_discrete(type = oneclust::cud(), na.translate = F) +
+    labs(title = "TCC mutations") +
+  theme_graph()
+  
+p1
+
+# Panel B: centrality measures
+p2 <- df_centrality %>%
+  filter(centrality_type == "centrality_d") %>%
+  ggplot(aes(x = centrality_value, fill = invasive_group)) +
+  geom_density(alpha = .6)  +
+  scale_fill_discrete(type = oneclust::cud(), na.translate = F) +
+  theme_bw()
+
+p2
+
+df_plot <- df_centrality %>%
+  drop_na(invasive_group) %>%
+  filter(centrality_type == "centrality_d") %>%
+  mutate(adaptive = centrality_value > 0) %>%
+  count(invasive_group, adaptive) %>%
+  complete(invasive_group, adaptive, fill = list(n = 0)) %>%
+  dplyr::group_by(invasive_group) %>%
+  mutate(frac = n/sum(n)) %>%
+  mutate(frac_adaptive = frac[which(adaptive)])
+
+p3 <- df_plot %>%
+  filter(adaptive) %>%
+  ungroup() %>%
+  ggplot(aes(x = fct_reorder(invasive_group, frac_adaptive), y = frac,
+             size = n, 
+             colour = invasive_group)) +
+  geom_point() +
+  scale_x_discrete(name = "") +
+  scale_y_continuous(name = "Proportion of episodes") +
+   scale_colour_discrete(type = oneclust::cud(), na.translate = F, guide = "none") +
+  scale_size_continuous(name = "Number of adaptive episodes") +
+  coord_flip() +
+  theme_bw()
+
+p3
+
+
+
+# Panel C: mutated genes
+df_plot <- df_mutations %>%
+  mutate(neb_gene_symbol = fct_reorder(neb_gene_symbol, glm.pval)) %>%
+  dplyr::group_by(mutation_compartment, invasive_group, neb_gene_symbol, glm.pval, EFFTYPE_SHORT) %>%
+  summarise(n_events = n_distinct(patient_episode_unique)) 
+
+df_plot <- df_plot %>%
+  ungroup() %>%
+  select(invasive_group, neb_gene_symbol, n_events) %>%
+  tidyr::complete(neb_gene_symbol, invasive_group, fill = list(n_events = 0))
+
+p4 <- df_plot %>%
+  ggplot(aes(x = invasive_group, y = fct_rev(neb_gene_symbol), fill = n_events)) +
+  geom_tile() +
+  scale_x_discrete(position = "top", name = "", labels = ~ str_wrap(., 15)) +
+  scale_y_discrete(name = "") +
+  scale_fill_gradient2(low = "blue", high = "red", midpoint = 0) +
+  theme_bw() 
+p4
+
+# Combine 
+p5 <- p2 / p3
+p8 <- wrap_plots(p5, p4, nrow = 1) +
+  plot_layout(guides = "collect")
+p8
+
+wrap_plots(p7, p8, p6, ncol = 1)
+# show TCC and TII only
+wrap_plots(p7, p6, ncol = 1) 
+
+# ggsave("figures/adaptation_signatures_clinical_correlates.pdf",
+#        width = 12, height = 12)
+```
