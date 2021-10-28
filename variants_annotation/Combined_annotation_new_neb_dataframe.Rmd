@@ -1,0 +1,301 @@
+---
+title: "Repeat combined annotation with the latest neb dataset"
+author: "Stefano Giulieri"
+date: "07/10/2021"
+output: html_document
+---
+
+Here, we repeat the annotation step of the meta-analysis. We use the dataset of genetic changes that is already existing but we streamline the neb annotation by using a shared, curated dataset that uses standardised labels for genes and operons and also contains the NEB mutant id information.
+
+```{r setup, include=F}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = here::here())
+msg <- glue::glue("My directory is {here::here()}")
+setwd(here::here())
+message(msg)
+```
+
+```{r message=F}
+library(tidyverse)
+library(writexl)
+rm(list = ls())
+```
+
+# Part 1: combine dataframe of genetic changes
+
+```{r}
+df_genetic_changes_mutation_compartment <- readRDS("Patient_episode_analysis/processed_data/combined_annotation/df_changes_mutation_compartment.Rda")
+```
+
+# Part 2: add multi-layered annotation of coding regions
+
+At this stage we can add:
+- global cd-hit cluster (amino acid clustering)
+- FPR3757 locus tag (based on the best hit with blastp for each cd-hit cluster)
+- aureowiki annotation
+- operons 
+- COG
+- GO
+- promoters (TTS Emote)
+- RNA features (Maeder, PLoS Genetics 2016)
+
+## Cd-hit clustering
+
+### First layer of annotation: cd hit clusters 
+
+Here we construct the first layer of annotation of our mutated genes: the output of cd-hit of protein sequences (default parameters). We use two tabular files:
+- cdhit ouput with cluster id and cluster stats for each mutated gene
+- protein sequences of each cluster representative
+
+#### Cd-hit output
+
+```{r}
+dir <- "Patient_episode_analysis/raw_data/combined_annotation/"
+dir.create(dir)
+f <- "~/Documents/Transfer_with_server/all_mutated_genes.prot.cdhit.tab"
+fname <- basename(f)
+file.copy(f, dir, overwrite = T)
+cdhit_clusters <- read_tsv(str_c(dir, fname))
+glimpse(cdhit_clusters)
+
+setdiff(gene_list$LOCUS_TAG, cdhit_clusters$id)
+
+rm(f, fname)
+```
+
+As we can see, the clustering information is missing for 25 mutated genes. *We will need to check the reason for this later (issue with sequence extraction? issue with cd-hit?)*
+
+#### Amino acid sequence of cluster representatives 
+
+```{r}
+f <- "~/Documents/Transfer_with_server/all_mutated_genes.prot.cdhit.representative.tab"
+fname <- basename(f)
+file.copy(f, dir, overwrite = T)
+cdhit_representative <- read_tsv(str_c(dir, fname), col_names = c("FASTA_ID", "SEQUENCE"))
+glimpse(cdhit_representative)
+
+rm(f, fname)
+```
+
+#### Construct the first layer of annotation
+
+```{r}
+df_representative <- cdhit_clusters %>%
+  filter(clstr_rep == 1) %>%
+  distinct(clstr, id) %>%
+  left_join(cdhit_representative, by = c("id" = "FASTA_ID")) %>%
+  dplyr::rename(cdhit_cluster_representative = id)
+
+df_cdhit <- cdhit_clusters %>%
+  left_join(df_representative) %>%
+  transmute(LOCUS_TAG = id,
+            cluster_id = str_c("cdhit-",
+                               formatC(clstr, digits = 3, format = "d", flag = "0")),
+            clstr, clstr_size, GENE_LENGTH = length, cdhit_cluster_representative, clstr_iden, clstr_cov, clstr_sequence = SEQUENCE)
+skimr::skim(df_cdhit)
+
+rm(cdhit_clusters, cdhit_representative, df_representative)
+```
+
+### Second layer of annotation: matched genes in FPR3757 (based on blastp)
+
+#### blastp output
+
+```{r}
+f <- "~/Documents/Transfer_with_server/mutated_genes_cdhit_FPR3757_blastp.tab"
+fname <- basename(f)
+file.copy(f, dir, overwrite = T)
+
+col_names <- c("QUERY", "SUBJECT", "PIDENT", "ALIGNLEN", "MISMATCH", "GAPS", "QSTART", "QEND", "SSTART", "SEND", "EVALUE", "BITSCORE", "QLEN")
+blastp_data <- read_tsv(str_c(dir, fname), col_names = col_names)
+glimpse(blastp_data)
+skimr::skim(blastp_data)
+
+rm(f, fname, col_names)
+```
+
+#### Construct the second layer of annotation
+
+```{r}
+df_blastp <- blastp_data %>%
+  mutate(PCOV = ALIGNLEN/QLEN*100) # we need to calculate the coverge here because the qcov* variables in blastp don't represent coverage as calculated here (checked manually looking at local alignments)
+
+df_blastp %>%
+  ggplot(aes(x = PCOV)) +
+  geom_histogram() +
+  theme_bw()
+
+df_blastp %>%
+  ggplot(aes(x = PIDENT)) +
+  geom_histogram() +
+  theme_bw()
+
+df_blastp %>%
+  mutate(iden90 = PIDENT >= 90) %>%
+  ggplot(aes(x = PCOV)) +
+  geom_histogram() +
+  facet_wrap(~iden90) +
+  theme_bw()
+```
+
+Here is an attempt to filter these blast matches. First, we remove matches with less than 90% amino acid identity and 50% coverage. Second, we sort the remaining matches by descreasing identity and decreasing coverage and select the top match. 
+
+**These threshold need to be re-assessed.**
+
+```{r}
+df_blastp <- df_blastp %>%
+  filter(PIDENT >=90 & PCOV >= 50) %>%
+  arrange(QUERY, desc(PIDENT, PCOV)) %>%
+  group_by(QUERY) %>%
+  slice_head(n = 1) %>%
+  select(cdhit_cluster_representative = QUERY, neb_locus_tag = SUBJECT, clstr_sequence_length = QLEN, PIDENT, PCOV)
+
+rm(blastp_data)
+```
+
+#### Combine first and second layer of annotation in one file
+
+```{r}
+df_multi_annotation <- df_cdhit %>%
+  left_join(df_blastp)
+
+rm(df_cdhit, df_blastp)
+```
+
+### Third layer of annotation: neb annotation including aureowiki and microbeonline operons
+
+Load the most updated and complete version of the dataframe
+
+```{r}
+df_neb_curated <- readRDS("~/OneDrive - The University of Melbourne/R/SAUREUS-GENERAL/ref_genomes/processed_data/FPR3757/df_neb_curated.Rda")
+```
+
+#### Update multi-layered annotation file
+
+```{r}
+df_multi_annotation <- df_multi_annotation %>%
+  left_join(df_neb_curated) %>%
+  # Generate a unique label for cdhit clusters
+  group_by(cluster_id) %>%
+  mutate(cluster_symbol = if_else(!is.na(neb_gene_symbol),
+                                  neb_gene_symbol,
+                                  cluster_id))
+```
+
+### Fourth layer of annotation: COGs
+
+We don't use this annotation anymore.
+
+### Fifth layer of annotation: promoters
+
+Here we add the intergenic mutations / IS insertions together with predicted promoters (if existing)
+
+```{r}
+f <- "~/Documents/Transfer_with_server/all_snps.promoters.bed"
+fname <- basename(f)
+file.copy(f, str_c(dir, fname), overwrite = F)
+
+df_mutations_promoters <- read_tsv(str_c(dir, fname), col_names = c("CHROM_prom", "START_prom", "END_prom", "promoter_id", "score", "STRAND_prom", "SSTART", "SSEND", "CHROM", "START", "END", "patient_episode_unique" )) 
+df_mutations_promoters <- df_mutations_promoters %>%
+   select(patient_episode_unique, CHROM, START = END, promoter_id, promoter_strand = STRAND_prom, promoter_start = START_prom, promoter_end = END_prom )
+
+f <- "~/Documents/Transfer_with_server/all_primary.intergenic.promoters.bed"
+fname <- basename(f)
+# file.copy(f, str_c(dir, fname), overwrite = T)
+
+df_insertions_promoters <- read_tsv(str_c(dir, fname), col_names = c("CHROM_prom", "START_prom", "END_prom", "promoter_id", "score", "STRAND_prom", "SSTART", "SSEND", "CHROM", "START", "END", "mutation_id","CHANGE_NT_LENGTH", "alignment_type", "patient_episode_unique", "sequence_id" )) 
+df_insertions_promoters <- df_insertions_promoters %>%
+   select(patient_episode_unique, CHROM, START, promoter_id, promoter_strand = STRAND_prom, promoter_start = START_prom, promoter_end = END_prom )
+
+# combine in one dataframe
+df_promoters_annot <- full_join(df_mutations_promoters,
+                                df_insertions_promoters) 
+
+df_promoters_annot_converg <- df_promoters_annot %>%
+  group_by(promoter_id) %>%
+  mutate(n_events = n_distinct(patient_episode_unique)) %>%
+  distinct()
+
+rm(df_mutations_promoters, df_insertions_promoters, df_promoters_annot_converg)
+``` 
+
+# Final combined annotation dataframe
+
+```{r}
+df_changes_multi_annotated <- df_genetic_changes_mutation_compartment %>%
+  select(-c(date_collection:typeII_final)) %>%
+  left_join(df_multi_annotation) %>%
+  left_join(df_promoters_annot)
+
+rm(df_multi_annotation, df_promoters_annot)
+```
+
+Re-annotate mutations with position within the operon
+
+```{r}
+df_changes_multi_annotated <- df_changes_multi_annotated %>%
+  group_by(neb_operon_symbol) %>%
+  mutate(operon_position = case_when(
+    neb_operon_strand == "+" & !is.na(NT_POS) ~ neb_start - neb_operon_start + NT_POS,
+    neb_operon_strand == "-" & !is.na(NT_POS) ~  neb_operon_end - neb_end + NT_POS,
+    neb_operon_strand == "+" & !is.na(distance_from_flanking_prot) ~ neb_start - neb_operon_start + distance_from_flanking_prot,
+    neb_operon_strand == "-" & !is.na(distance_from_flanking_prot) ~  neb_operon_end - neb_end + distance_from_flanking_prot,
+  ))
+
+# df_changes_multi_annotated %>%
+#   filter(str_detect(neb_operon_symbol, "agr")) %>%
+#   View()
+
+# df_changes_multi_annotated %>%
+#   filter(str_detect(neb_operon_symbol, "cap")) %>%
+#   View()
+```
+
+# Supp table for the paper
+
+```{r}
+supp_table_mutations_prepare <- df_changes_multi_annotated %>%
+  select(mutation_id, mutation_compartment, episode_id = patient_episode_unique, mapping_ref, internal_ref, CHROM, START, END, CHANGE_NT_LENGTH, is_family, REF, ALT, MUTTYPE, EFFTYPE_SHORT, MUTATION_SHORT, LOCUS_TAG, GENE, PRODUCT, flanking_prot_position_to_mutation, mutation_position_to_flanking_prot, distance_from_flanking_prot, cluster_symbol, operon_id = microbes_online_operon_id, cdhit_cluster_id = cluster_id, cdhit_cluster_aa_sequence = clstr_sequence, Sa_FPR3757_locus_tag = neb_locus_tag, Sa_FPR3757_gene_start = neb_start, Sa_FPR3757_gene_end = neb_end, TSS_EMOTE_promoter_id = promoter_id, promoter_strand, promoter_start, promoter_end) %>%
+  distinct()
+```
+
+# Write to separate excel spreadsheets
+
+```{r}
+supp_table_mutations_prepare_list <- supp_table_mutations_prepare %>%
+  mutate(group = case_when(
+    str_detect(mutation_id, "MUT") ~ "point mutations",
+    str_detect(mutation_id, "DEL") ~ "large deletions",
+    str_detect(mutation_id, "SPLITTER") ~ "IS insertions"
+  )) %>%
+  ungroup() %>%
+  group_split(group)
+
+# Use the value from the "Species" column to provide a name for the list members
+supp_table_mutations_prepare_list %>%
+  purrr::map(~pull(.,group)) %>% # Pull out Species variable
+  purrr::map(~as.character(.)) %>% # Convert factor to character
+  purrr::map(~unique(.)) -> names(supp_table_mutations_prepare_list) # Set this as names for list members
+
+supp_table_mutations_prepare_list <- supp_table_mutations_prepare_list %>%
+  purrr::map(~select(., -group))
+
+supp_table_mutations_prepare_list <- supp_table_mutations_prepare_list[c("point mutations", "IS insertions", "large deletions")]
+
+```
+
+# Save processed data
+
+```{r}
+dir <- "Patient_episode_analysis/processed_data/combined_annotation/new_neb_dataset/"
+dir.create(dir)
+
+df_changes_multi_annotated %>%
+  saveRDS(str_c(dir, "df_changes_multi_annotated.Rda"))
+df_changes_multi_annotated %>%
+  write_csv(str_c(dir, "df_changes_multi_annotated.csv"))
+
+supp_table_mutations_prepare_list %>%
+  writexl::write_xlsx(str_c(dir, "supp_table_mutations_prepare.xlsx"))
+```
+
