@@ -1,0 +1,110 @@
+---
+title: 'Updated combined annotation with CAMERA2 patient-episode analysis'
+author: "Stefano Giulieri"
+date: "08/10/2021"
+output: 
+  html_document:
+    toc: TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+setwd(stringr::str_c(here::here(), "/Updated_analysis_with_CAMERA2"))
+msg <- glue::glue("My directory is {getwd()}")
+message(msg)
+```
+
+
+Here we create a dataset with convergence data. The whole gene convergence analysis process is described in `Gene_convergence_analysis.Rmd`.
+
+The gene convergence dataset will be assembled using:
+
+1. The gsea output
+2. The neb annotation
+3. (optional) the list of mutations and isolates with mutations
+
+
+```{r}
+library(tidyverse)
+library(BioNet)
+rm(list = ls())
+```
+
+# Parse GSEA results
+
+```{r}
+file.copy("~/Documents/Transfer_with_server/genes", "GSEA/", recursive = T, overwrite = F)
+
+f <- list.files("GSEA/genes", recursive = T,  pattern = "results.gene", full.names = T)
+
+gene_results <- map_df(f, function(x){
+  class <- basename(dirname(x))
+  df <- read_tsv(x) %>%
+    mutate(mutation_compartment = class)
+})
+
+f <- list.files("GSEA/genes", recursive = T,  pattern = "results.ontology", full.names = T)
+
+ontology_results <- map_df(f, function(x){
+  class <- basename(dirname(x))
+  df <- read_tsv(x) %>%
+    mutate(mutation_compartment = class)
+})
+```
+
+Combine in one dataframe
+
+```{r}
+df_gsea <- gene_results %>%
+  select(neb_locus_tag = Locus, nsub, kb, enrich, mutation_compartment) %>%
+  left_join(ontology_results %>% select(neb_locus_tag = Ontology, glm.pval, mutation_compartment)) %>%
+  mutate(mutation_compartment = as.factor(mutation_compartment)) %>%
+  arrange(glm.pval) 
+```
+
+# Set significance threshold
+
+```{r}
+bonf <- .05/n_distinct(df_gsea$neb_locus_tag)
+suggest <- 1/n_distinct(df_gsea$neb_locus_tag)
+# bum.mle <- fitBumModel(ontology_results$glm.pval, plot=TRUE)
+# tau <- fdrThreshold(fdr=0.05, fb=bum.mle)
+```
+
+# Add neb annotation
+
+Phage will be removed because we perform an `inner_join()`
+
+```{r}
+df_neb_curated <- readRDS("../../SAUREUS-GENERAL/ref_genomes/processed_data/FPR3757/df_neb_curated.Rda")
+
+df_gsea_neb <- df_gsea %>%
+  inner_join(df_neb_curated) %>%
+  relocate(neb_locus_tag, neb_gene_symbol) 
+```
+
+# Add mutations
+
+Here we need to perform a `left_join()`. Why? Because x (`df_gsea`) contains rows that don't exist in y (`df_mutations`), namely genes with no mutations and rows with a `all` compartment
+
+```{r}
+df_mutations <- readRDS("processed_data/gene_convergence/df_changes_multi_annot_for_gene_converg.Rda")
+
+df_gsea_neb_with_mutations <- df_gsea_neb %>%
+  left_join(df_mutations)
+```
+
+# Save processed data
+
+```{r}
+df_gsea_neb %>%
+  saveRDS("processed_data/gene_convergence/df_gsea_neb.Rda")
+df_gsea_neb %>%
+  write_csv("processed_data/gene_convergence/df_gsea_neb.csv")
+
+df_gsea_neb_with_mutations %>%
+  saveRDS("processed_data/gene_convergence/df_gsea_neb_with_mutations.Rda")
+df_gsea_neb_with_mutations %>%
+  write_csv("processed_data/gene_convergence/df_gsea_neb_with_mutations.csv")
+```
+

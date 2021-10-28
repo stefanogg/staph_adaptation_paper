@@ -1,0 +1,269 @@
+---
+title: 'Updated combined annotation with CAMERA2 patient-episode analysis'
+author: "Stefano Giulieri"
+date: "01/10/2021"
+output: 
+  html_document:
+    toc: TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+setwd(stringr::str_c(here::here(), "/Updated_analysis_with_CAMERA2"))
+msg <- glue::glue("My directory is {getwd()}")
+message(msg)
+```
+
+Here, we repeat the convergence analysis at gene level after updating the dataset with the CAMERA-2 episodes.
+
+The convergence analysis is structured as follows:
+
+1. Filter the dataset: remove syn mutations and intergenic, *remove large deletions*, keep FPR3757 only and mask phage regions
+2. Count number of independent mutations and summarise mutations
+3. Perform GSEA analysis for the entire dataset and for the three compartments (on the server)
+
+In a separate script
+4. Create a dataset with convergence data and generate summary figures
+
+Optional
+5. (optional) perform a within-host convergence analysis
+6. (optional) correlated with clinical data
+7. (optional) separate analysis of large deletions
+
+```{r}
+library(tidyverse)
+library(patchwork)
+rm(list = ls())
+```
+
+# Raw data
+
+```{r}
+df_combined_annot <- readRDS("processed_data/combined_annotation/df_changes_multi_annotated.Rda")
+```
+
+# 1) Filter dataset
+
+The curated list of FPR3757 genes - phages removed
+
+```{r}
+df_neb_curated <- readRDS("../../SAUREUS-GENERAL/ref_genomes/processed_data/FPR3757/df_neb_curated.Rda")
+
+phage_genes <- read_lines("../../SAUREUS-GENERAL/ref_genomes/raw_data/Sa_FPR3757/FPR3757_phage_locus_tag.txt")
+
+df_neb_curated <- df_neb_curated %>%
+  filter(!neb_locus_tag %in% phage_genes)
+```
+
+Get a sense on how the mutations are distributed
+
+```{r}
+df_combined_annot %>%
+  ggplot(aes(x = fct_infreq(EFFTYPE_SHORT), 
+             fill = mutation_compartment)) +
+  geom_bar() +
+  scale_fill_discrete(type = oneclust::cud()) +
+  labs(x = "", title = "Distribution of genetic changes") +
+  coord_flip() +
+  theme_bw()
+```
+
+Clean multi-annotation dataset
+
+```{r}
+df_combined_annot_clean <- df_combined_annot %>%
+  semi_join(df_neb_curated) %>%
+  filter(! EFFTYPE_SHORT %in% c("synonymous", "intergenic", "IS insertion (intergenic)", "large deletion"))
+```
+
+# 2) Count number of independent mutations and summarise mutations
+
+Check for convergent *mutations*: same gene, same mutation
+
+```{r}
+df_converg_mutations <- df_combined_annot_clean %>%
+  drop_na(MUTATION_SHORT) %>%
+  group_by(cluster_symbol, MUTATION_SHORT ) %>%
+  mutate(n_events = n_distinct(patient_episode_unique)) %>%
+  relocate(n_events)
+
+df_converg_mutations <- df_converg_mutations %>%
+  ungroup() %>%
+  filter(n_events > 1) %>%
+  distinct(n_events, mutation_id, patient_episode_unique, mutation_compartment, neb_gene_symbol, MUTATION_SHORT, neb_product) %>%
+  arrange(neb_gene_symbol, MUTATION_SHORT) 
+```
+
+Check for convergent *positions*: same gene, same position
+
+```{r}
+df_converg_positions <- df_combined_annot_clean %>%
+  drop_na(MUTATION_SHORT) %>%
+  group_by(cluster_symbol, AA_POS ) %>%
+  mutate(n_events = n_distinct(patient_episode_unique)) %>%
+  relocate(n_events)
+
+df_converg_positions <- df_converg_positions %>%
+  ungroup() %>%
+  filter(n_events > 1) %>%
+  select(n_events, mutation_id, patient_episode_unique, mutation_compartment, neb_gene_symbol, AA_POS, MUTATION_SHORT, neb_product) %>%
+  distinct() %>%
+  arrange(desc(n_events), neb_gene_symbol, AA_POS , MUTATION_SHORT) 
+```
+
+Check for convergent *genes*: same neb gene
+
+```{r}
+df_converg_genes <- df_combined_annot_clean %>%
+  group_by(cluster_symbol) %>%
+  mutate(n_events = n_distinct(patient_episode_unique)) %>%
+  relocate(n_events) %>%
+  arrange( desc(n_events), cluster_symbol)
+
+t_converg_genes <- df_combined_annot_clean %>%
+  group_by(cluster_symbol, neb_gene, neb_product, neb_locus_tag, pan_gene_symbol) %>%
+  summarise(n_events = n_distinct(patient_episode_unique),
+            mutations = str_c(unique(MUTATION_SHORT),
+                              collapse = ", "),
+            gene_prokka = str_c(unique(GENE),
+                                collapse = ", "),
+            product_prokka = str_c(unique(PRODUCT),
+                                   collapse = ", ")) %>%
+  arrange(desc(n_events)) %>%
+  relocate(n_events, pan_gene_symbol, neb_gene, gene_prokka, neb_locus_tag, neb_product, product_prokka, mutations)
+
+t_converg_genes %>%
+  ungroup() %>%
+  filter(n_events > 1) %>%
+  select(n_events, pan_gene_symbol, neb_locus_tag,  neb_product)%>%
+  knitr::kable(row.names = T)
+
+# How many episodes and strains with mutations in convergent genes 
+df_converg_genes %>%
+  filter(n_events >= 2) %>%
+  pull(patient_episode_unique) %>%
+  n_distinct()
+```
+
+Check for within-host convergence. *This is experimental at this stage. Needs to be checked in detail.*
+
+```{r}
+df_converg_within_host <- df_combined_annot_clean %>%
+  group_by(cluster_symbol, patient_episode_unique, sequence_id) %>%
+  mutate(ALLELE = str_c(MUTATION_SHORT, collapse = "-")) %>%
+  group_by(cluster_symbol, patient_episode_unique) %>%
+  mutate(n_events = n_distinct(ALLELE)) %>%
+  relocate(n_events) %>%
+  arrange( desc(n_events), cluster_symbol)
+
+df_converg_within_host <- df_converg_within_host %>%
+  ungroup() %>%
+  filter(n_events > 1) %>%
+  select(n_events, patient_episode_unique, mutation_compartment, neb_gene_symbol, ALLELE, neb_product) %>%
+  distinct() %>%
+  arrange(desc(n_events), neb_gene_symbol, ALLELE) 
+```
+
+## Save processed data
+
+```{r}
+dir <- "processed_data/gene_convergence/"
+dir.create(dir)
+
+df_combined_annot_clean %>%
+  saveRDS(str_c(dir, "df_changes_multi_annot_for_gene_converg.Rda"))
+df_combined_annot_clean %>%
+  write_csv(str_c(dir, "df_changes_multi_annot_for_gene_converg.csv"))
+
+df_converg_mutations %>%
+  write_csv(str_c(dir, "df_converg_mutations.csv"))
+
+df_converg_positions %>%
+  write_csv(str_c(dir, "df_converg_positions.csv"))
+```
+
+
+# 3) Perform GSEA
+
+We will perform this analysis on the server. Here, we prepare the input files for 4 analyses
+
+* all mutations
+* type CC mutations (TCC)
+* type CI mutations (TCI)
+* type II mutations (TII)
+
+# Create the file structure
+
+```{r}
+dir <- "GSEA/"
+dir.create(dir)
+dir <- str_c(dir, "genes/")
+dir.create(dir)
+
+# Create files for "all"
+type <- "all"
+dir.create(str_c(dir, type))
+
+gene_info <- df_neb_curated %>%
+  ungroup() %>%
+  select(Name = neb_locus_tag,
+         Length = neb_gene_length) %>%
+  mutate(Length = Length/1000) %>%
+  arrange(Name)
+
+mut_info <- df_combined_annot_clean %>%
+  group_by(neb_locus_tag) %>%
+  summarise(n_mutations = n_distinct(patient_episode_unique)) %>%
+  select(Name = neb_locus_tag, replacement = n_mutations) %>%
+  right_join(gene_info %>% select(Name)) %>%
+  replace_na(list(replacement = 0)) %>%
+  arrange(Name) %>%
+  column_to_rownames("Name")
+
+ontologies <- gene_info %>%
+  transmute(Name1 = Name, Name2 = Name) %>%
+  mutate(var = 1) %>%
+  pivot_wider(names_from = Name2, values_from = var, values_fill = 0) %>%
+  column_to_rownames("Name1")
+
+gene_info %>%
+  write_tsv(str_c(dir, type, "/", type, ".gene_info.txt"))
+
+mut_info %>%
+  write.table(str_c(dir, type, "/", type, ".mut_info.txt"),
+              row.names = T, quote = F, sep = "\t")
+
+ontologies %>%
+  write.table(str_c(dir, type, "/", type, ".ontologies.txt"),
+              row.names = T, quote = F, sep = "\t")
+
+# Create files for subtypes
+for (type in unique(df_combined_annot_clean$mutation_compartment)){
+ 
+  dir.create(str_c(dir, type))
+  
+  file.copy(str_c(dir, "all/all.ontologies.txt"), str_c(dir, type))
+  file.copy(str_c(dir, "all/all.gene_info.txt"), str_c(dir, type))
+  
+  mut_info <- df_combined_annot_clean %>%
+    filter(mutation_compartment == type) %>%
+  group_by(neb_locus_tag) %>%
+  summarise(n_mutations = n_distinct(patient_episode_unique)) %>%
+  select(Name = neb_locus_tag, replacement = n_mutations) %>%
+  right_join(gene_info %>% select(Name)) %>%
+  replace_na(list(replacement = 0)) %>%
+  arrange(Name) %>%
+  column_to_rownames("Name")
+  
+  mut_info %>%
+  write.table(str_c(dir, type, "/", type, ".mut_info.txt"),
+              row.names = T, quote = F, sep = "\t")
+  
+  
+}
+
+# move all files to the server
+file.copy("GSEA/genes/", "~/Documents/Transfer_with_server/", recursive = T)
+```
+
+

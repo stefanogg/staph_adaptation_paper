@@ -1,0 +1,268 @@
+---
+title: 'Updated combined annotation with CAMERA2 patient-episode analysis'
+author: "Stefano Giulieri"
+date: "08/10/2021"
+output: 
+  html_document:
+    toc: TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+setwd(stringr::str_c(here::here(), "/Updated_analysis_with_CAMERA2"))
+msg <- glue::glue("My directory is {getwd()}")
+message(msg)
+```
+
+
+Here we generate figure for the gene enrichment analysis. The whole gene convergence analysis process is described in `Gene_convergence_analysis.Rmd`.
+
+```{r}
+library(tidyverse)
+library(patchwork)
+library(ggrepel)
+rm(list = ls())
+```
+
+# Load data
+
+```{r}
+df_gsea_neb <- readRDS("processed_data/gene_convergence/df_gsea_neb.Rda")
+
+df_mutations <- readRDS("processed_data/gene_convergence/df_changes_multi_annot_for_gene_converg.Rda")
+```
+
+# Figure 3: gene enrichment in the entire dataset
+
+```{r}
+base_sz <- 20
+point_sz <- 3
+colors <- RColorBrewer::brewer.pal(n = 6, name = "PuOr")
+names(colors) <- rev(c("IS insertion (intragenic)", "IS insertion (intergenic)", "large deletion", "intergenic", "non-synonymous", "truncating"))
+colors_genes <- colors[c(1,2,6)]
+colors_genes
+
+df_gsea_all <- df_gsea_neb %>%
+  filter(mutation_compartment == "all")
+```
+
+
+## Panel A 
+
+```{r}
+bonf <- .05/n_distinct(df_gsea_all$neb_locus_tag)
+n_genes_with_sub <- df_gsea_all %>%
+  filter(nsub > 0) %>%
+  .$neb_locus_tag %>%
+  n_distinct()
+bonf <- .05/n_genes_with_sub
+suggest <- 1/n_genes_with_sub
+
+df_plot <- df_gsea_all %>%
+  filter(enrich > 1) %>%
+  select(neb_gene_symbol, glm.pval, enrich) %>%
+  arrange(glm.pval) %>%
+  mutate(glm.pval = -log10(glm.pval),
+         plot_order = row_number()) 
+
+df_plot <- df_plot %>%
+  filter(plot_order < 20)
+
+p1 <- df_plot %>%
+  ggplot(aes(x = fct_reorder(neb_gene_symbol, plot_order, .desc = T),
+             y = glm.pval, colour = glm.pval > -log10(bonf))) +
+ # geom_point(size = point_sz) +
+  geom_point(aes(size = enrich)) +
+  geom_hline(yintercept = -log10(bonf), linetype = "dashed") +
+  # geom_hline(yintercept = -log10(suggest), colour = "red") +
+  scale_size(name = "Enrichment", breaks = c(10, 20, 40)) +
+  scale_colour_manual(values = c("blue", "red"), labels = c("> Bonf", "< Bonf"), name = "p value", guide = "none") +
+  coord_flip() +
+  labs(x = "",
+       y = "-log10(p)") +
+  theme_bw(base_size = base_sz) +
+  theme(text = element_text(face = "bold"),
+        legend.position = "right",
+        legend.title = element_text(size = 16))
+p1
+```
+
+# Panel B
+
+```{r}
+df_plot2 <- df_mutations %>%
+  group_by(neb_gene_symbol, EFFTYPE_SHORT, mutation_compartment) %>%
+  summarise(n_mutations = n_distinct(patient_episode_unique))
+
+df_plot2 <- df_plot2 %>%
+  right_join(df_plot %>% select(neb_gene_symbol, plot_order))
+
+# change the label of the mutation_compartment
+df_plot2 <- df_plot2 %>%
+  ungroup() %>%
+  mutate(mutation_compartment = fct_recode(mutation_compartment,
+                                           `type CC` = "colonising-colonising",
+                                           `type CI` = "colonising-invasive",
+                                           `type II` = "invasive-invasive"))
+
+p3 <- df_plot2 %>%
+  ggplot(aes(x = fct_reorder(neb_gene_symbol, plot_order, .desc = T),
+             y = n_mutations,
+             fill = EFFTYPE_SHORT)) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~mutation_compartment) +
+ scale_fill_manual(values = colors_genes, name = "Mutation") +
+  scale_y_continuous(breaks = seq(0,15, 5),
+                     minor_breaks = seq(0,15, 1)) +
+  labs(x = "", y = "Independent acquisitions") +
+  coord_flip() +
+  theme_bw(base_size = base_sz) +
+  theme(text = element_text(face = "bold"),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        legend.title = element_text(size = 16))
+
+p3
+```
+
+Plot B: mutation mini-maps
+
+Here we plot the whole operon with location of intragenic and intergenic mutations. For this, we need to extract the location of intergenic mutations in relation to the flanking protein. We already have this information for point mutations but not for large deletions and IS insertions.
+
+```{r}
+df_gene_maps <- df_mutations %>%
+  right_join(df_plot %>% select(neb_gene_symbol, plot_order)) %>%
+  group_by(neb_gene_symbol, AA_POS, EFFTYPE_SHORT, plot_order) %>%
+  summarise(n_events = n_distinct(patient_episode_unique)) 
+
+df_rect <- df_mutations %>%
+  right_join(df_plot %>% select(neb_gene_symbol, plot_order)) %>%
+  group_by(neb_gene_symbol, plot_order) %>%
+  summarise(xmin = plot_order - 0.25,
+            xmax = plot_order + 0.25, 
+            ymin = 0,
+            ymax = max(GENE_LENGTH))
+  
+
+p4 <- df_gene_maps %>%
+  ggplot(aes(x = plot_order, y = AA_POS, colour = EFFTYPE_SHORT, size = n_events)) +
+  geom_point(shape = 17) +
+  geom_rect(data = df_rect, aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax),
+            inherit.aes = F, alpha = 0, color = "black") +
+  scale_y_continuous(limits = c(0,1000), breaks = c(0,500, 1000)) +
+  scale_x_reverse(expand = c(0, .4)) +
+  scale_color_manual(values = colors_genes, na.translate = F, name = "Mutation", guide = F) +
+  scale_size(breaks = 1:3, name = "Independent\nacquisitions") +
+  coord_flip() +
+  labs(x = "",
+       y = "Amino acid position") +
+  theme_bw(base_size = base_sz) +
+  theme(panel.grid = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        legend.position = "right") +
+  theme(text = element_text(face = "bold"),
+        legend.title = element_text(size = 16))
+
+p4
+```
+
+Combine
+
+```{r}
+wrap_plots(p1, p3, p4) +
+  plot_annotation(tag_levels = "A") +
+  plot_layout(widths = c(5, 15, 11),  guides = "collect") &
+  theme(plot.tag = element_text(size = 20))
+
+dir.create("figures/")
+ggsave("figures/gene_enrichment_all.pdf", width = 15, height = 7)
+```
+
+# Figure 5: GSEA across compartments
+
+```{r}
+df_gsea_compartments <- df_gsea_neb %>%
+  filter(mutation_compartment != "all")
+
+# bonf <- bonf/3
+# suggest <- suggest/3
+
+# df_gsea_compartments <- df_gsea_compartments %>%
+#   group_by(neb_locus_tag) %>%
+#   filter(any(nsub > 0)) %>%
+#   group_by(mutation_compartment) %>%
+#   mutate(p_fdr = p.adjust(glm.pval, method = "fdr")) %>%
+#   relocate(p_fdr)
+```
+
+As Volcano plot
+
+```{r}
+df_gsea_compartments %>%
+  group_by(neb_locus_tag) %>%
+  filter(any(nsub > 0)) %>%
+  mutate(mutation_compartment = fct_recode(mutation_compartment,
+                                           `type CC` = "colonising-colonising",
+                                           `type CI` = "colonising-invasive",
+                                           `type II` = "invasive-invasive")) %>%
+  # remove genes with zero value
+  filter(enrich > 1) %>%
+  # remove "all
+  filter(mutation_compartment != "all") %>%
+  ggplot(aes(x = enrich, y = -log10(glm.pval))) +
+  geom_hline(yintercept = -log10(bonf), linetype = "dashed") + 
+   geom_hline(yintercept = -log10(suggest), linetype = "dotted") + 
+  geom_point(aes(colour = glm.pval < bonf)) +
+   geom_label_repel(data = . %>% filter(glm.pval < 1e-5 | mutation_compartment == "type CC" & glm.pval < suggest), aes(label = neb_gene_symbol),
+                  box.padding = .25, min.segment.length = 0.25, point.size =1, force = 2, max.overlaps = Inf) +
+  geom_label_repel(data = . %>% filter(glm.pval < suggest & glm.pval > 1e-5 & mutation_compartment == "type II"), aes(label = neb_gene_symbol),
+                  box.padding = .25, min.segment.length = 0.25, point.size =1, force_pull = 2, force = 2, nudge_x = 100, direction = "y",
+                  max.overlaps = Inf) +
+  scale_x_continuous(trans = "log10") +
+  scale_color_manual(values = c("blue", "red"), guide = F) +
+  # ylim(0,7) +
+  facet_wrap(~mutation_compartment,  nrow = 1) +
+  labs(x = "Enrichment", y = "-log10(p value)") +
+  # ylim(0,10) +
+  theme_bw(base_size = 20) +
+  theme(text = element_text(face = "bold"))
+
+ggsave("figures/gene_enrichment_volcano_plot_compart_only_no_scale_limits.pdf", width = 10, height = 5)
+```
+
+As Manthattan plot
+
+```{r}
+df_gsea_compartments %>%
+  group_by(neb_locus_tag) %>%
+  filter(any(nsub > 0)) %>%
+  ungroup() %>%
+  filter(enrich > 1) %>%
+  mutate(mutation_compartment = fct_recode(mutation_compartment,
+                                           `type CC` = "colonising-colonising",
+                                           `type CI` = "colonising-invasive",
+                                           `type II` = "invasive-invasive")) %>%
+  mutate(signif_category = case_when(
+    glm.pval < bonf ~ "bonf",
+    glm.pval > bonf & glm.pval < suggest ~ "suggest",
+    glm.pval > suggest ~ "ns"
+  )) %>%
+  ggplot(aes(x = neb_start/1e6, y = -log10(glm.pval))) +
+  geom_hline(yintercept = -log10(bonf), linetype = "dashed") + 
+   geom_hline(yintercept = -log10(suggest), linetype = "dotted") + 
+  geom_point(aes(colour = glm.pval < bonf, size = enrich)) +
+  geom_label_repel(data = . %>% filter(glm.pval < suggest), aes(label = neb_gene_symbol),
+                  box.padding = .25, min.segment.length = 0, point.size =1, nudge_x = -.25) +
+  scale_color_manual(values = c("blue", "red"), guide = F) +
+  scale_size(breaks = c(10,20,40)) +
+  # ylim(0,7) +
+  facet_wrap(~mutation_compartment,  nrow = 1) +
+  labs(x = "Gene position (Mb)", y = "-log10(p value)") +
+  # ylim(0,10) +
+  theme_bw(base_size = 20) +
+  theme(text = element_text(face = "bold"))
+
+ggsave("figures/gene_enrichment_manhattan_plot_compart_only_no_scale_limits.pdf", width = 10, height = 5)
+```
+

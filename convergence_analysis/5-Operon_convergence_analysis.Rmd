@@ -1,0 +1,277 @@
+---
+title: 'Updated operon convergence analysis with CAMERA2 patient-episode analysis'
+author: "Stefano Giulieri"
+date: "11/10/2021"
+output: 
+  html_document:
+    toc: TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+setwd(stringr::str_c(here::here(), "/Updated_analysis_with_CAMERA2"))
+msg <- glue::glue("My directory is {getwd()}")
+message(msg)
+```
+
+Here, we repeat the convergence analysis at operon level after updating the dataset with the CAMERA-2 episodes.
+
+The convergence analysis is structured as follows:
+
+1. Filter the dataset: remove syn mutations, *remove large deletions*, keep FPR3757 only and mask phage regions
+2. Count number of independent mutations and summarise mutations
+3. Perform GSEA analysis for the entire dataset and for the three compartments (on the server)
+
+In a separate script
+4. Create a dataset with convergence data 
+
+In another seperate script:
+5. generate summary figures
+
+Optional
+6. (optional) perform a within-host convergence analysis
+7. (optional) correlated with clinical data
+8. (optional) separate analysis of large deletions
+9. (optional) convergence analysis of intergenic regions
+
+```{r}
+library(tidyverse)
+rm(list = ls())
+```
+
+# Raw data
+
+```{r}
+df_combined_annot <- readRDS("processed_data/combined_annotation/df_changes_multi_annotated.Rda")
+```
+
+# 1) Filter dataset
+
+The curated list of FPR3757 genes - phages removed
+
+```{r}
+df_neb_curated <- readRDS("../../SAUREUS-GENERAL/ref_genomes/processed_data/FPR3757/df_neb_curated.Rda")
+
+phage_genes <- read_lines("../../SAUREUS-GENERAL/ref_genomes/raw_data/Sa_FPR3757/FPR3757_phage_locus_tag.txt")
+
+df_neb_curated <- df_neb_curated %>%
+  filter(!neb_locus_tag %in% phage_genes)
+```
+
+Get a sense on how the mutations are distributed
+
+```{r}
+df_combined_annot %>%
+  ggplot(aes(x = fct_infreq(EFFTYPE_SHORT), 
+             fill = mutation_compartment)) +
+  geom_bar() +
+  scale_fill_discrete(type = oneclust::cud()) +
+  labs(x = "", title = "Distribution of genetic changes") +
+  coord_flip() +
+  theme_bw()
+```
+
+Have a closer look at intergenic mutations
+
+```{r}
+df_combined_annot %>%
+  filter(EFFTYPE_SHORT == "intergenic") %>%
+  ggplot(aes(x = distance_from_flanking_prot)) +
+  geom_histogram() +
+  facet_grid(is.na(promoter_id)~mutation_position_to_flanking_prot, labeller = label_both, scales = "free") +
+  theme_bw()
+
+# How many mutations could be assigned to a promoter ?
+df_combined_annot %>%
+  filter(EFFTYPE_SHORT %in% c("intergenic", "IS insertion (intergenic)")) %>%
+ group_by(mutation_id) %>%
+  mutate(promoter_assigned = any(!is.na(promoter_id))) %>%
+  ungroup() %>%
+  distinct(mutation_id, promoter_assigned) %>%
+  count(promoter_assigned) %>%
+  mutate(frac = scales::percent(n/sum(n)))
+```
+
+Clean multi-annotation dataset
+
+```{r}
+df_combined_annot_clean <- df_combined_annot %>%
+  semi_join(df_neb_curated) %>%
+  filter(! EFFTYPE_SHORT %in% c("synonymous", "large deletion"))
+```
+
+# Group mutations in defined operons
+
+Here we define operons in 3 ways:
+
+* all coding regions matching neb genes listed in the operon (for intragenic mutations)
+* all positions between start codon of the first neb gene of the operon and stop codong of the last gene (to include "intergenic" mutations that are in fact intragenic but were incorrectly classified due to assembly issues or truncated genes)
+* all positions within promoters linked to the operon and between the start of the promoter and the start codon of the first gene (to include intergenic mutations in promoters and initial part of the transcript)
+
+```{r}
+df_combined_annot_operons <- df_combined_annot_clean %>%
+  drop_na(neb_operon_symbol)  %>%
+  
+  # classify intergenic mutations in promoter regions
+  mutate(intergenic_promoter = str_detect(EFFTYPE_SHORT, "intergenic") & !is.na(promoter_id) & distance_from_flanking_prot < 0, 
+         intergenic_expected_intragenic = str_detect(EFFTYPE_SHORT, "intergenic") & operon_position > min(neb_operon_gene_start) & operon_position < max(neb_operon_gene_end),
+         intergenic_exclude = !intergenic_promoter & !intergenic_expected_intragenic) %>%
+  
+  # mask unclassified intergenic  mutations
+  filter(!(str_detect(EFFTYPE_SHORT, "intergenic") & !intergenic_promoter)) %>%
+  
+  relocate(neb_operon_symbol, starts_with("intergenic_"))
+```
+
+
+# 2) Count number of independent mutations and summarise mutations
+
+No sure if it is meaning to check for convergent *mutations* here.
+
+
+Check for convergent *positions*: same gene, same position
+
+```{r}
+df_converg_positions <- df_combined_annot_operons %>%
+  group_by(neb_operon_symbol, operon_position) %>%
+  mutate(n_events = n_distinct(patient_episode_unique)) %>%
+  relocate(n_events) %>%
+  arrange(desc(n_events))
+
+df_converg_positions <- df_converg_positions %>%
+  ungroup() %>%
+  filter(n_events > 1) %>%
+  select(n_events, neb_operon_symbol, operon_position, EFFTYPE_SHORT, mutation_id, patient_episode_unique, mutation_compartment, neb_gene_symbol, AA_POS, MUTATION_SHORT, neb_product) %>%
+  distinct() %>%
+  arrange(desc(n_events), neb_operon_symbol, operon_position ) 
+```
+
+Check for convergent *operons*: same neb operon
+
+```{r}
+df_converg_operons <- df_combined_annot_operons %>%
+  group_by(neb_operon_symbol) %>%
+  mutate(n_events = n_distinct(patient_episode_unique)) %>%
+  relocate(n_events) %>%
+  arrange( desc(n_events), neb_operon_symbol)
+
+t_converg_operons <- df_combined_annot_operons %>%
+  group_by(neb_operon_symbol) %>%
+  summarise(n_events = n_distinct(patient_episode_unique),
+            mutated_genes = str_c(unique(neb_gene_symbol),
+                                collapse = ","),
+            mutations = str_c(unique(operon_position),
+                                   collapse = ",")) %>%
+  arrange(desc(n_events))  %>%
+  relocate(n_events)
+
+# How many episodes and strains with mutations in convergent operons 
+# df_converg_operons %>%
+#   filter(n_events >= 28) %>%
+#   pull(patient_episode_unique) %>%
+#   n_distinct()
+```
+
+Check for within-host convergence. *This is experimental at this stage. Needs to be checked in detail.* (see gene convergence script)
+
+
+## Save processed data
+
+```{r}
+dir <- "processed_data/operon_convergence/"
+dir.create(dir)
+
+df_combined_annot_operons %>%
+  saveRDS(str_c(dir, "df_changes_multi_annot_for_operon_converg.Rda"))
+df_combined_annot_clean %>%
+  write_csv(str_c(dir, "df_changes_multi_annot_for_operon_converg.csv"))
+
+df_converg_positions %>%
+  write_csv(str_c(dir, "df_converg_positions.csv"))
+```
+
+
+# 3) Perform GSEA
+
+We will perform this analysis on the server. Here, we prepare the input files for 4 analyses
+
+* all mutations
+* type CC mutations (TCC)
+* type CI mutations (TCI)
+* type II mutations (TII)
+
+# Create the file structure
+
+```{r}
+dir <- "GSEA/"
+dir.create(dir)
+dir <- str_c(dir, "operons/")
+dir.create(dir)
+
+# Create files for "all"
+type <- "all"
+dir.create(str_c(dir, type))
+
+gene_info <- df_neb_curated %>%
+  ungroup() %>%
+  drop_na(neb_operon_symbol) %>%
+  transmute(Name = operon_id,
+         Length = neb_operon_end - neb_operon_start) %>%
+  mutate(Length = Length/1000) %>%
+  distinct() %>%
+  arrange(Name)
+
+mut_info <- df_combined_annot_operons %>%
+  group_by(operon_id) %>%
+  summarise(n_mutations = n_distinct(patient_episode_unique)) %>%
+  select(Name = operon_id, replacement = n_mutations) %>%
+  right_join(gene_info %>% select(Name)) %>%
+  replace_na(list(replacement = 0)) %>%
+  arrange(Name) %>%
+  column_to_rownames("Name")
+
+ontologies <- gene_info %>%
+  transmute(Name1 = Name, Name2 = Name) %>%
+  mutate(var = 1) %>%
+  pivot_wider(names_from = Name2, values_from = var, values_fill = 0) %>%
+  column_to_rownames("Name1")
+
+gene_info %>%
+  write_tsv(str_c(dir, type, "/", type, ".gene_info.txt"))
+
+mut_info %>%
+  write.table(str_c(dir, type, "/", type, ".mut_info.txt"),
+              row.names = T, quote = F, sep = "\t")
+
+ontologies %>%
+  write.table(str_c(dir, type, "/", type, ".ontologies.txt"),
+              row.names = T, quote = F, sep = "\t")
+
+# Create files for subtypes
+for (type in unique(df_combined_annot_operons$mutation_compartment)){
+ 
+  dir.create(str_c(dir, type))
+  
+  file.copy(str_c(dir, "all/all.ontologies.txt"), str_c(dir, type))
+  file.copy(str_c(dir, "all/all.gene_info.txt"), str_c(dir, type))
+
+  mut_info <- df_combined_annot_operons %>%
+     filter(mutation_compartment == type) %>%
+  group_by(operon_id) %>%
+  summarise(n_mutations = n_distinct(patient_episode_unique)) %>%
+  select(Name = operon_id, replacement = n_mutations) %>%
+  right_join(gene_info %>% select(Name)) %>%
+  replace_na(list(replacement = 0)) %>%
+  arrange(Name) %>%
+  column_to_rownames("Name")
+  
+  mut_info %>%
+  write.table(str_c(dir, type, "/", type, ".mut_info.txt"),
+              row.names = T, quote = F, sep = "\t")
+  
+  
+}
+
+# move all files to the server
+file.copy("GSEA/operons/", "~/Documents/Transfer_with_server/", recursive = T)
+```

@@ -1,0 +1,268 @@
+---
+title: "GSEA: ontologies"
+author: "Stefano Giulieri"
+date: "12/10/2021"
+output: html_document
+---
+
+Here, we perform the GSEA for functional categories.
+
+First we need to annotate each mutated protein with the functional categorisation. Only mutated proteins with FPR3757 homologs are annotated. Here, we use the GO annotation of FPR3757.
+
+We then use the enrichment analysis implemented in the clusterProfile package. 
+ORA: over-representation analysis
+GSEA: gene set enrichment analysis
+Genes are ranked based on their p value.
+
+```{r setup, include=F}
+knitr::opts_chunk$set(echo = TRUE)
+setwd(stringr::str_c(here::here(), "/Updated_analysis_with_CAMERA2"))
+msg <- glue::glue("My directory is {getwd()}")
+message(msg)
+```
+
+```{r message=F}
+library(tidyverse)
+library(clusterProfiler)
+library(patchwork)
+rm(list = ls())
+```
+
+# Raw data
+
+Combined annotation database
+
+```{r}
+df_multi_annot <- readRDS("processed_data/combined_annotation/df_changes_multi_annotated.Rda")
+```
+
+Output of gene enrichment analysis
+
+```{r}
+df_gene_enrichment <- readRDS("processed_data/gene_convergence/df_gsea_neb.Rda")
+```
+
+
+FPR3757 annotation
+
+```{r}
+df_neb <- readRDS("~/OneDrive - The University of Melbourne/R/SAUREUS-GENERAL/ref_genomes/processed_data/FPR3757/df_neb_curated.Rda")
+
+phage_genes <- read_lines("~/OneDrive - The University of Melbourne/R/SAUREUS-GENERAL/ref_genomes/raw_data/Sa_FPR3757/FPR3757_phage_locus_tag.txt")
+
+df_neb <- df_neb %>%
+  filter(!neb_locus_tag %in% phage_genes)
+
+df_functional_annot <- readRDS("../Gene_enrichment_analysis/processed_data/df_FPR3757_functional_annotation_amr_plus.Rda") %>%
+  # merge antibiotic resistance categories
+  mutate(desc = if_else(desc == "Antibiotic adaptation", "response to antibiotic", desc)) %>%
+   mutate(GO = if_else(desc == "response to antibiotic", "AMR_PLUS", GO))
+```
+
+# Perform GSEA on all 4 datasets
+
+```{r}
+list_ora <- list()
+list_gsea <- list()
+
+for (my_compart in unique(df_gene_enrichment$mutation_compartment)){
+  
+  # Perform ORA
+  df_ora_in <- df_gene_enrichment %>%
+  filter(mutation_compartment == my_compart) %>%
+  filter(nsub > 1)
+  
+
+genes_convergent <- unique(df_ora_in$neb_locus_tag)
+
+df_term_to_gene <- df_functional_annot %>%
+  ungroup() %>%
+  select(GO, neb_locus_tag)
+
+df_term_to_name <- df_functional_annot %>%
+  ungroup() %>%
+  select(GO, desc) %>%
+  distinct()
+
+ORA <- enricher(gene =  genes_convergent,
+                TERM2GENE = df_term_to_gene,
+                TERM2NAME = df_term_to_name,
+                pvalueCutoff = 1,
+                pAdjustMethod = "fdr")
+
+df_ora_out <- as_tibble(ORA)
+
+list_ora[[my_compart]] <- df_ora_out
+
+# Perform GSEA
+
+df_gsea_in <- df_gene_enrichment %>%
+  filter(mutation_compartment == my_compart) %>%
+  mutate(log_p = -log10(glm.pval))
+
+genes_ranked <- df_gsea_in$log_p
+# genes_ranked <- df_gsea_in$enrich
+names(genes_ranked) <- df_gsea_in$neb_locus_tag
+genes_ranked <- sort(genes_ranked, decreasing =T) 
+ 
+head(genes_ranked)
+
+gsea_out <- GSEA(geneList = genes_ranked,
+                 TERM2GENE = df_term_to_gene,
+                 TERM2NAME = df_term_to_name,
+                 pvalueCutoff = 1,
+                 pAdjustMethod = "fdr",
+                 minGSSize = 10)
+
+df_gsea_out <- as_tibble(gsea_out)
+
+list_gsea[[my_compart]] <- df_gsea_out
+  
+}
+
+df_ora <- map_df(list_ora, bind_rows, .id = "dataset") 
+
+df_gsea <- map_df(list_gsea, bind_rows, .id = "dataset")
+```
+
+# Combine results in on dataframe
+
+```{r}
+df_gsea_with_neb <- df_functional_annot %>%
+  left_join(df_gsea, by = c("GO" = "ID")) %>%
+  left_join(df_gene_enrichment) %>%
+  left_join(df_neb) %>%
+  arrange(pvalue) 
+```
+
+# Visualisations
+
+```{r}
+# gsea_out
+# emapplot(gsea_out)
+
+bonf <- .05/n_distinct(df_gsea$ID)
+
+df_plot <- df_gsea %>%
+  filter(dataset != "all") %>%
+  filter(NES > 0) %>%
+  arrange(desc(NES)) %>%
+  # arrange(pvalue) %>%
+  group_by(dataset) %>%
+    # slice_max(NES, n=10) %>%
+  # slice_min(pvalue, n=10) %>%
+  mutate(dataset = fct_recode(dataset,
+                                           `type CC` = "colonising-colonising",
+                                           `type CI` = "colonising-invasive",
+                                           `type II` = "invasive-invasive")) %>%
+  
+  # mutate(plot_order = row_number() + (cur_group_id() * 1000)) %>%
+    mutate(plot_order = row_number() )
+
+
+
+
+p1 <- df_plot %>%
+    # filter(p.adjust < .05) %>%
+    ggplot(aes(x = plot_order, y = NES,
+               fill = p.adjust < 0.05)) +
+    geom_bar(stat = "identity") +
+  facet_wrap(~dataset, scales = "free_x") +
+  scale_fill_manual(values = c("#9ecae1", "#08306b")) +
+  labs(x = "Ontology", y = "Normalised enrichment score (NES)") +
+  theme_bw(base_size = 20) +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())
+    # theme_bw(base_size = 20) +
+  # theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+p1
+
+p2 <- df_plot %>%
+    filter(dataset == "type II" & p.adjust < 0.05) %>%
+    ggplot(aes(x = fct_reorder(str_wrap(Description, 20), pvalue, .desc = T), y = -log10(pvalue),
+               colour = NES, size = setSize)) +
+    geom_point() +
+  scale_y_continuous(expand = expansion(mult = c(.2)),
+                     limits = c(2,5),
+                     breaks = c(2,4,6)) +
+  scale_color_viridis_c() +
+  scale_size(name = "Set size", range = c(5,10), breaks = c(25,50,100,200)) +
+  coord_flip() +
+  labs(x = "") +
+  theme_bw(base_size = 15) 
+    # theme_bw(base_size = 20) +
+  # theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+p2
+
+wrap_plots(p1, p2) +
+  plot_layout(guides = "collect", ncol = 2, widths = c(10,2,2)) +
+  plot_annotation(tag_levels = "A") &
+  theme(text = element_text(face = "bold"),
+    legend.title = element_text(size = 15),
+        legend.text = element_text(size = 12))
+
+ggsave("figures/gsea_with_signif_ontologies.pdf", width = 14, height = 6)
+
+```
+
+```{r}
+df_plot <- df_gsea %>%
+  filter(dataset != "all") %>%
+  # filter(NES > 0) %>%
+  mutate(dataset = fct_recode(dataset,
+                                           `type CC` = "colonising-colonising",
+                                           `type CI` = "colonising-invasive",
+                                           `type II` = "invasive-invasive")) 
+
+df_plot %>%
+  ggplot(aes(x = NES, y = -log10(p.adjust), colour = p.adjust < 0.05)) +
+  geom_point() +
+  ggrepel::geom_label_repel(data = df_plot %>% filter(p.adjust < 0.1), aes(label = Description), max.overlaps = Inf) +
+  geom_hline(yintercept = -log10(.05)) +
+  facet_wrap(~dataset) +
+  scale_colour_manual(values = c("blue", "red"), guide = F) +
+  theme_bw()
+```
+
+# Generate dataset for saving
+
+```{r}
+df_gsea_annotated <- df_gsea %>%
+  separate_rows(core_enrichment, sep = "/") %>%
+  left_join(df_neb %>% ungroup() %>% select(neb_locus_tag, neb_gene_symbol),
+            by = c("core_enrichment" = "neb_locus_tag")) %>%
+  group_by(across(.cols = dataset:leading_edge)) %>%
+  summarise(n_mutated_genes = n(),
+            core_enrichment = str_c(core_enrichment, collapse = ","),
+            mutated_genes = str_c(neb_gene_symbol, collapse = ",")) %>%
+  mutate(mutated_genes = if_else(NES < 0, NA_character_, mutated_genes),
+         n_mutated_genes = if_else(NES < 0, NA_integer_, n_mutated_genes)) %>%
+  mutate(dataset = as.factor(dataset)) %>%
+  arrange(p.adjust)
+```
+
+
+# Save processed data
+
+```{r}
+dir <- "processed_data/"
+
+subdir <- str_c(dir, "gsea_ontologies_clusterProfile/")
+dir.create(subdir)
+
+df_gsea_annotated %>%
+  saveRDS(str_c(subdir, "df_gsea_ontologies.Rda"))
+
+supp_table_gsea_ontologies_prepare <- df_gsea_annotated %>%
+  ungroup() %>%
+  select(dataset, `GO term` = Description, `size of the GO set` = setSize, `Enrichment score` = enrichmentScore, `Normalised enrichment score (NES)` = NES, `unadjusted p value` = pvalue, `FDR-adjusted p value` = p.adjust, `Number of mutated genes in the set` = n_mutated_genes, `Mutated genes ` = mutated_genes) %>%
+  ungroup() %>%
+  group_split(dataset, .keep = T) 
+
+names(supp_table_gsea_ontologies_prepare) <- sort(unique(df_gsea_annotated$dataset))
+
+supp_table_gsea_ontologies_prepare %>%
+  writexl::write_xlsx(str_c(subdir, "supp_table_gsea_ontologies_prepare.xlsx"))
+```
