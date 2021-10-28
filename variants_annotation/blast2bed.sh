@@ -1,5 +1,7 @@
 #!/bin/bash
 
+# This is a slightly modified version of this original script https://github.com/nterhoeven/blast2bed
+
 INPUT="$1"
 
 #check if input file is provided
