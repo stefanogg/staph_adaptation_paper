@@ -5,7 +5,8 @@
 
 USAGE="$0 -f <grouped snippy dir>\\n
 \\t Grouped snippy dir: a directory with 2 or more snippy runs of related sequences and a shared reference\\n
-\\t -f (force): remove existing directory"
+\\t -f (force): remove existing directory\\n
+\\t This script works in a conda snippy environment"
 
 
 if [ $# -eq 0 ]
