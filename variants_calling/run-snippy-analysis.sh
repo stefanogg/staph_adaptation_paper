@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 # Pipeline to run snippy on patient-episode isolates
+# The script runs on a pre-created directory of grouped isolates containing: 
+# 1) A reads.tab file with column1=isolate name. column2=R1, column3=R2 or an asssembly.tab # file with column1=isolate name, column2=draft assembly path
+# 2) A "reference" folder with the reference in gbk format
+# This script works in a conda snippy environment
 
 # Author: Stefano Giulieri
 # Date: July 2020
