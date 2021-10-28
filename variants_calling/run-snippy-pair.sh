@@ -1,3 +1,10 @@
+#!/usr/bin/env bash
+
+# Author: Stefano Giulieri
+# Date: February 2021 (last revision: May 2021)
+
+# This script runs snippy 
+
 # Assess arguments
 if [ $# -lt  3 ]
 then
