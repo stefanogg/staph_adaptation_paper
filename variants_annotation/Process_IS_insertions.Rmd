@@ -1,0 +1,315 @@
+---
+title: "Process IS insertions data from split reads"
+author: "Stefano Giulieri"
+date: "08/04/2021"
+output: html_document
+---
+
+Here, we analyse insertions detected from split reads extracted from the bwa alignment to the closest available complete genome
+
+```{r setup, include=F}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = here::here())
+msg <- glue::glue("My directory is {here::here()}")
+message(msg)
+```
+
+```{r message=F}
+library(tidyverse)
+rm(list = ls())
+source("../Functions/gff_utilities.R")
+```
+
+# Raw data: output of split-break
+
+Note: both here and in the annotate file we found some duplicated lines. We will need to checkk why this is the case at some point.
+
+```{r}
+dir <- "Within_host_analysis/raw_data/IS_insertions/"
+dir.create(dir)
+f <- "~/Documents/Transfer_with_server/all_related.mask.insertion.pairs.bed"
+fname <- basename(f)
+
+file.copy(f, dir, overwrite = F)
+
+colnames <- colnames <- c("CHROM_start", "START_start", "END_start", "splitter_depth_start", "splitter_type_start", "break_depth_start", "ratio_start", "CHROM_stop", "START_stop", "END_stop", "splitter_depth_stop", "splitter_type_stop","break_depth_stop", "ratio_stop", "ISOLATE", "PAIR_ID", "ISO1", "ISO2")
+breaks_data <- read_tsv(str_c(dir, fname),
+                           col_names = colnames) %>%
+  mutate(total_ratio = ratio_start + ratio_stop) %>%
+  rename(CHROM = CHROM_start, START = START_start, END = END_stop)
+
+# discard duplicates
+breaks_data <- distinct(breaks_data)
+
+rm(colnames, f, fname)
+
+```
+
+# datasets of annotated putative IS insertions
+
+This dataset was generate using `annotate-splitters.py`.
+
+Putative insertions are annotated if they are in coding regions.
+
+```{r}
+f <- "~/Documents/Transfer_with_server/all_related.insertion.pairs.annotated.tab"
+fname <- basename(f)
+file.copy(f, dir, overwrite = T)
+
+colnames <- c("PAIR_ID", "ISOLATE", "CHROM", "START", "END", "insertion_pair_id", "length", "alignment_type", "TYPE", "PRODUCT", "LOCUS_TAG", "coordinates")
+insertions_data <- read_tsv(str_c(dir, fname),
+                           col_names = colnames, guess_max = 1e5) 
+# discard duplicates
+insertions_data <- distinct(insertions_data)
+
+glimpse(insertions_data)
+
+rm(colnames)
+```
+
+Merge in one file
+
+```{r}
+df_insertions <- insertions_data %>%
+  left_join(breaks_data)
+
+# Check duplicated lines
+df_insertions %>%
+  group_by(PAIR_ID, ISOLATE, CHROM, START, END, insertion_pair_id, length, alignment_type, TYPE, PRODUCT, LOCUS_TAG, coordinates) %>%
+  mutate(n = n()) %>%
+    filter(n > 1)
+
+# add mutation id
+nrow(distinct(insertions_data, PAIR_ID, insertion_pair_id))
+df_insertions <- df_insertions %>%
+ group_by(PAIR_ID, insertion_pair_id) %>%
+  mutate(mutation_id = str_c("ISins-", formatC(cur_group_id(), width = 4, format = "d", flag = "0")))
+
+rm(breaks_data)
+```
+
+Get IS type. First, we explore the transposase annotation of the supplementary reads. Then, we extract this information and summarise it.
+
+```{r}
+df_supplementary <- insertions_data %>%
+  filter(alignment_type == "supplementary")
+
+
+IS_pattern <- "IS\\w*\\d*"
+# Get all possible IS qualifications
+str_extract_all(df_supplementary$PRODUCT, IS_pattern, simplify = F) %>%
+  unlist() %>%
+  unique()
+
+str_subset(df_supplementary$PRODUCT, IS_pattern) %>%
+  unique()
+
+# Extract and summarise
+df_supplementary %>%
+  mutate(IS_annotation_type = str_extract(PRODUCT, IS_pattern)) %>%
+  drop_na(IS_annotation_type) %>%
+  distinct(PRODUCT, IS_annotation_type)
+# This shows that extracting the IS pattern string is an acceptable way of guessing the IS class
+
+# Extract and summarise (grouped)
+df_IS_annotation <- df_supplementary %>%
+  group_by(PAIR_ID, insertion_pair_id) %>%
+  summarise(IS_annotation_found = any(str_detect(PRODUCT, IS_pattern)),
+            IS_annotation_all = str_c(unique(str_subset(PRODUCT, IS_pattern)), collapse = ","),
+            IS_annotation_type = str_c(unique(na.omit(str_extract(PRODUCT, IS_pattern))),
+                                       collapse = ",")
+            )
+ 
+df_IS_annotation %>%
+  ungroup() %>%
+  count(IS_annotation_found, IS_annotation_type)
+
+
+df_insertions_IS_annot <- df_insertions %>%
+  left_join(df_IS_annotation)
+
+df_insertions_IS_annot <-  df_insertions_IS_annot %>%
+  filter(alignment_type == "primary") %>%
+  select(PAIR_ID, ISO1, ISO2, ISOLATE, CHROM, START, END,mutation_id, insertion_pair_id, length, alignment_type, TYPE, PRODUCT, LOCUS_TAG, coordinates, total_ratio, IS_annotation_found, IS_annotation_all, IS_annotation_type)
+
+rm(insertions_data, df_supplementary, df_insertions, df_IS_annotation)
+```
+
+# Inspect the ratio (to define a filter)
+
+```{r}
+df_insertions_IS_annot %>%
+  ggplot(aes(x = total_ratio)) +
+  geom_histogram() +
+  labs(title = "Breakpoint/total split coverage ratio") +
+  theme_bw()
+
+df_insertions_IS_annot %>%
+  ggplot(aes(x = total_ratio)) +
+  geom_histogram() +
+  facet_wrap(~length) +
+  labs(title = "Breakpoint/total split coverage ratio according \nto the insertion length in bases") +
+  theme_bw()
+
+df_insertions_IS_annot %>%
+  ggplot(aes(x = total_ratio)) +
+  geom_histogram() +
+  facet_wrap(~IS_annotation_found) +
+  labs(title = "Breakpoint/total split coverage ratio according \nto the annotation of the supplementary alignment",
+       subtitle = "NA: no annotation of the supplementary alignment") +
+  theme_bw()
+
+
+```
+
+Based on the plots it appears that a total ratio of 0.75 is a reasonable threshold and that splitters with IS annotation are enriched for a ratio > 0.75, which confirms the validity of our approach (in other words, the IS insertion pattern as detected by split_break and the annotation of supplementary reads are consistent).
+
+Therefore, we keep splitters with a ratio of 0.75 or more and a transposase annotation
+
+```{r}
+df_insertions_clean <- df_insertions_IS_annot %>%
+  filter(total_ratio > 0.75) 
+
+df_insertions_clean %>%
+  count(IS_annotation_found)
+
+# We have 1,054 insertions with high ratio and no IS annotation. They seem to represent recombination events, eg in large surface proteins or other variable regions. For example, see split reads of WGP-0005
+
+df_insertions_clean <- df_insertions_clean %>%
+  filter(IS_annotation_found)
+
+rm(df_insertions_IS_annot)
+
+```
+
+Basic plots
+
+```{r}
+# n insertions
+df_insertion_events <- df_insertions_clean %>%
+  group_by(PAIR_ID, IS_annotation_type) %>%
+  summarise(n_events = n())
+
+df_insertion_events %>%
+  ggplot(aes(x = n_events)) +
+  geom_histogram() +
+  facet_wrap(~IS_annotation_type) +
+  theme_bw()
+```
+
+
+# annotation of intergenic regions
+
+To annotate intergenic regions we used the shell script `~/Within_host_meta-analysis/analysis_2020/patient-episode-analysis/read_coverage_ref_genomes/annotate-intergenic/annotate-splitters-intergenic.sh`
+
+This script annotate the file with the primary alignment of the insertions (`*.primary.bed` file in the `annotate-splitters_v2.py` output) using the intergenic regions of the reference genome.
+
+```{r}
+f <- "~/Documents/Transfer_with_server/all_related.primary.intergenic.tab"
+fname <- basename(f)
+file.copy(f, dir, overwrite = F)
+colnames <- c("PAIR_ID", "ISO1", "ISO2", "ISOLATE","CHROM_protein", "SOURCE", 
+               "TYPE", 
+               "START_prot", 
+               "END_prot", 
+               "SCORE", 
+               "STRAND", 
+               "PHASE", 
+               "ATTRIBUTES",
+              "CHROM_intergenic", "START_intergenic", "END_intergenic", "CHROM", "START", "END", "insertion_pair_id", "length", "alignment_type")
+insertions_intergenic <- read_tsv(str_c(dir, fname), col_names = colnames)
+
+
+rm(colnames)
+```
+
+# Extract gff features
+
+```{r}
+df_insertions_intergenic <- insertions_intergenic %>%
+  gff_to_tab() 
+
+df_insertions_intergenic <- df_insertions_intergenic %>%
+  select(PAIR_ID:ISOLATE, START, END, insertion_pair_id, length, alignment_type, START_prot, END_prot, STRAND, LOCUS_TAG = locus_tag, GENE = gene, PRODUCT = product, faa_seq = translation)
+
+
+# edit intergenic annotations
+df_insertions_intergenic <- df_insertions_intergenic %>%
+  mutate(flanking_prot_position_to_mutation = if_else(START_prot < START, "left", "right"),
+         mutation_position_to_flanking_prot = if_else(flanking_prot_position_to_mutation == "left" & STRAND == "-" | flanking_prot_position_to_mutation == "right" & STRAND == "+", "promoter", "terminator"),
+         distance_from_flanking_prot = case_when(
+           STRAND == "+" & flanking_prot_position_to_mutation == "right" ~ START - START_prot,
+           STRAND == "+" & flanking_prot_position_to_mutation == "left" ~ START - END_prot,
+           STRAND == "-" & flanking_prot_position_to_mutation == "left" ~ START_prot - START,
+           STRAND == "-" & flanking_prot_position_to_mutation == "right" ~ END_prot - START
+         ))
+
+rm(insertions_intergenic)
+```
+
+
+# Summarise annotations
+
+```{r}
+coordinates_pattern <- "\\[ExactPosition\\((\\d+)\\):ExactPosition\\((\\d+)\\)\\]\\(([+|-])\\)"
+
+df_annotations_coding <- df_insertions_clean %>%
+  filter(TYPE == "CDS") %>%
+  
+  # calculate AA POS
+  mutate(START_prot = as.integer(str_match(coordinates, coordinates_pattern)[,2]),
+         END_prot = as.integer(str_match(coordinates, coordinates_pattern)[,3]),
+         STRAND = str_match(coordinates, coordinates_pattern)[,4]) %>%
+  mutate(distance_from_start_nt = if_else(STRAND == "+",
+                                          START - START_prot,
+                                          END_prot - START)) %>%
+  mutate(distance_from_start_aa = ceiling(distance_from_start_nt/3)) %>%
+  mutate(annotation_type = "coding")
+
+df_annotations_intergenic <- df_insertions_clean %>%
+  filter(is.na(PRODUCT)) %>%
+  select(PAIR_ID:alignment_type, total_ratio:IS_annotation_type) %>%
+  left_join(df_insertions_intergenic) %>%
+  mutate(annotation_type = "intergenic")
+
+df_annotations <- df_annotations_coding %>%
+  full_join(df_annotations_intergenic) %>%
+  arrange(mutation_id)
+
+rm(df_annotations_coding, df_annotations_intergenic, df_insertions_intergenic)
+```
+
+Check that insertions in coding and intergenic regions are mutually exclusive and if this is not the case, check that the insertions is located at the edge of the coding region
+
+```{r}
+df_check_coding_intergenic <- df_annotations %>%
+  group_by(PAIR_ID, insertion_pair_id) %>%
+  mutate(insertion_in_coding = annotation_type == "coding" & !is.na(LOCUS_TAG),
+         insertion_in_intergenic = annotation_type == "intergenic" & !is.na(LOCUS_TAG)) %>%
+  mutate(insertion_in_coding = any(insertion_in_coding),
+            insertion_in_intergenic = any(insertion_in_intergenic)) 
+
+df_check_coding_intergenic %>%
+  ungroup() %>%
+  distinct(PAIR_ID, insertion_pair_id, insertion_in_coding, insertion_in_intergenic) %>%
+  count(insertion_in_coding, insertion_in_intergenic)
+```
+
+This shows that there are 371 insertions in coding regions, 333 in intergenic regions and 4 with no annotation
+
+```{r}
+View(df_check_coding_intergenic %>% filter(!insertion_in_coding & !insertion_in_intergenic))
+
+rm(df_check_coding_intergenic)
+```
+
+We will need to check these 4 mutations later!
+
+# Save processed data
+
+```{r}
+dir <- "Within_host_analysis/processed_data/IS_insertions/"
+dir.create(dir)
+df_annotations %>%
+  saveRDS(str_c(dir, "df_IS_insertions_annotated.Rda"))
+```

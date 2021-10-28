@@ -1,0 +1,147 @@
+---
+title: "Process deletions data from read coverage analysis using bedtools"
+author: "Stefano Giulieri"
+date: "09/04/2020"
+output: html_document
+---
+
+Here, we analyse deletions detected from comparing the read coverage within 1000bp windows of the draft assemblies of the internal reference .
+
+In the future, we will integrate split reads data. This should allow us to call smaller deletions (between 50-500 bp) with more confidence.
+
+```{r setup, include=F}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = here::here())
+msg <- glue::glue("My directory is {here::here()}")
+message(msg)
+```
+
+```{r message=F}
+library(tidyverse)
+rm(list = ls())
+source("../Functions/gff_utilities.R")
+```
+
+# Import deletion events
+
+```{r}
+f <- "~/Documents/Transfer_with_server/all_related.mask.deletions.bedg"
+fname <- basename(f)
+dir <- "Within_host_analysis/raw_data/deletions/"
+dir.create(dir)
+
+file.copy(f, str_c(dir, fname), overwrite = F)
+colnames <- c("CHROM", "START", "END", "COVERAGE", "LENGTH_before", "LENGTH_after", "ISOLATE", "PAIR_ID", "ISO1", "ISO2")
+deletions_events <- read_tsv(str_c(dir, fname),
+                           col_names = colnames)
+```
+
+attribute unique deletions ID. Sort by relevance (larger and smallest difference between before and after)
+
+```{r}
+deletions_events <- deletions_events %>%
+  arrange(PAIR_ID, CHROM, START) %>%
+  mutate(mutation_id = str_c("DEL-", formatC(row_number(), width = 6, format = "d", flag = "0")),
+         length_difference = LENGTH_before - LENGTH_after) %>%
+  relocate(mutation_id) %>%
+  arrange(length_difference, -LENGTH_after)
+
+```
+
+## Import annotated deletions
+
+```{r}
+f <- "~/Documents/Transfer_with_server/all_related.mask.deletions.gff"
+fname <- basename(f)
+
+
+file.copy(f, str_c(dir, fname), overwrite = F)
+
+colnames <- c("CHROM", "START", "END", "COVERAGE", "LENGTH_before", "LENGTH_after", "CHROM_protein", 
+               "SOURCE", 
+               "TYPE", 
+               "START_feat", 
+               "END_feat", 
+               "SCORE", 
+               "STRAND_feat", 
+               "PHASE", 
+               "ATTRIBUTES", "ISOLATE",
+              "PAIR_ID")
+deletions_data <- read_tsv(str_c(dir, fname),
+                           col_names = colnames) 
+```
+
+modify file
+
+```{r}
+deletions_annot <- deletions_data %>%
+  mutate(length_feat = END_feat - START_feat)
+
+deletions_annot %>%
+  filter(TYPE == "source") %>%
+  ggplot(aes(x = length_feat)) +
+  geom_histogram()
+
+```
+
+There appear to be deleted plasmids
+
+```{r}
+df_source_type <- deletions_annot %>%
+  filter(TYPE == "source") %>%
+  mutate(source_type = if_else(length_feat > 1e6, "chromosome", "plasmid")) %>%
+  select(CHROM:LENGTH_after, ISOLATE, PAIR_ID, source_type)
+
+df_source_type %>%
+  filter(LENGTH_after > 500) %>%
+  ggplot(aes(x = LENGTH_after)) +
+  geom_density() +
+  facet_wrap(~source_type) +
+  theme_bw()
+```
+
+
+```{r}
+deletions_annot <- deletions_annot %>%
+  filter(TYPE == "CDS") %>%
+  left_join(df_source_type)
+```
+
+Extract attributes
+
+```{r}
+deletions_annot <- deletions_annot %>%
+  gff_to_tab() 
+
+deletions_annot <- deletions_annot %>%
+  select(CHROM:LENGTH_after, TYPE:END_feat, STRAND_feat, ISOLATE:source_type, GENE =gene, PRODUCT = product, LOCUS_TAG = locus_tag, faa_seq= translation)
+```
+
+Merge in one file. Ideally, we would filter deletions with less than 20 bp length (we would expect that were detected by snippy) and a before-after difference of 10bp or more.
+
+To be consistent with the meta-analysis, we keep only deletions > 500 bp.
+
+```{r}
+df_deletions <- deletions_events %>%
+  left_join(deletions_annot)
+
+df_deletions_all <- df_deletions
+
+df_deletions <- df_deletions %>%
+  filter(LENGTH_after > 500)
+```
+
+
+# Save processed data
+
+```{r}
+dir <- "Within_host_analysis/processed_data/large_deletions/"
+dir.create(dir)
+
+df_deletions_all %>%
+  saveRDS(str_c(dir, "df_deletions_all.Rda"))
+  
+df_deletions %>%
+  saveRDS(str_c(dir, "df_deletions.Rda"))
+```
+

@@ -1,0 +1,545 @@
+---
+title: "Combined annotation"
+author: "Stefano Giulieri"
+date: "09/04/2021"
+output: html_document
+---
+
+Here, we perform the central task of the within-host processing of the data: 
+
+1. Combine all genetic changes (i.e. substitutions, indels, large deletions, IS insertions) in one dataframe
+2. Annotate these changes with multiple layers of genomic information (i.e. coding regions, operons, functional groups) (multi-layered annotation)
+
+This is work in progress and should ideally be updated with further annotation layers, eg promoters, regulatory regions and so on. However, our approach based on cd-hit and blastp doesn't work very well for these intergenic regions. Two solutions are possible:
+
+* use `blastn` to annotate intergenic regions of internal references and reference genomes: 1. Bed file of well annotated intergenic regions (eg transcription units and promoters based on RNA-seq data) 2. Multi-fasta of nucleotide sequences of these regions (`bedtools getfasta`) 3. Tabular blastn output (query: multifasta of intergenic regions; subject: reference) 4. Filter blastn output 5. Bed file of blastn output with additional columns (eg promoter id) (ideally gff format but bed would be enough at this stage) (modified `blast2bed.sh`) 6. Annotate mutations using bed file (`bedtools intersect`)
+
+* map positions of reference genomes on one or more well annotated reference genomes (eg FPR3757) using a whole-genome aligner or `blastn`
+
+***Other important point***: instead of the current approach which uses `cd-hit` to cluster protein sequences of mutated genes and then annotated the cd-hit clusters, we could first construct a pan-genome of all genes present in the mapping reference. We could then annotate pan-genome representatives with multiple layers of annotation. This approach would have several advantages:
+- the clustering step is performed only once and needs to be repeteated only if new episodes are included (or new references are used). This means that output of variants callers on the server (such as snippy) can already be annotated with the pan genome id
+- this approach would provide information on the "coreness" of the mutated genes
+- it is possible to map reads on a multifasta of pangenome representatives (as suggested by Romain)
+Note: we need to find a suitable pan-genome tool (maybe Panaroo?)
+
+```{r setup, include=F}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = here::here())
+msg <- glue::glue("My directory is {here::here()}")
+setwd(here::here())
+message(msg)
+```
+
+```{r message=F}
+library(tidyverse)
+# library(writexl)
+rm(list = ls())
+```
+
+# Part 1: combine all genetic changes in one dataframe
+
+This dataframe includes:  episode id, sequence id, mutation compartment, internal reference, reference genome, position (or start), end, mutation type, mutation effect, locus tag, gene, product.
+
+This formatting / processing stage should be performed earlier on in the process. Ideally, we would have an intermediate stage where raw data generated on the server (snippy, snippy mask, snippy intergenic, bwa coverage, annotate-splitters) are processed in a consistent format. Even more ideally, we would like to perform as much as possible of this on the server.
+
+Later these mutation tables can be annotated with mutation compartment information + metadata (linked to the sequence id / patient episode) and with multilayered annotation of coding regions.
+
+## Format snippy output
+
+### Import snippy output with annotation of coding regions and intergenic regions
+
+```{r}
+dir <- "Within_host_analysis/processed_data/"
+df_snippy <- readRDS(str_c(dir,"snippy/df_snippy_clean_with_intergenic_annotations.Rda"))
+```
+
+### Simplify
+
+```{r}
+df_snippy <- df_snippy %>%
+  select(PAIR_ID, ISO1, ISO2, ISOLATE, mutation_id, mapping_ref = REFERENCE, CHROM, START = POS, REF, ALT, TYPE, MUTTYPE, EFFTYPE_SHORT,NT_POS, AA_POS, CHANGE_NT_LENGTH, MUTATION_SHORT, LOCUS_TAG, GENE, PRODUCT, flanking_prot_position_to_mutation, mutation_position_to_flanking_prot, distance_from_flanking_prot) 
+```
+
+## Format large deletions
+
+Note that we exclude deletions in plasmids because we can't be sure that they don't represent secondary *ex vivo* plasmid losses.
+
+```{r}
+df_large_deletions <- readRDS(str_c(dir, "large_deletions/df_deletions.Rda"))
+
+df_large_deletions <- df_large_deletions %>%
+  filter(source_type != "plasmid") %>%
+  filter(LENGTH_after >= 500) %>%
+  mutate(EFFTYPE_SHORT = "large deletion")%>%
+  select(mutation_id, PAIR_ID, ISO1, ISO2, ISOLATE, CHROM, START, END, CHANGE_NT_LENGTH = LENGTH_after, LENGTH_before, length_difference,source_type, EFFTYPE_SHORT, LOCUS_TAG, PRODUCT, GENE)
+```
+
+### Add mapping reference
+
+```{r}
+dir <- "Within_host_analysis/raw_data/"
+dir.create(dir)
+f <- "~/Documents/Transfer_with_server/genetic_pairs_refgenomes.tab"
+fname <- basename(f)
+file.copy(f, dir, overwrite = F)
+ref_genomes <- read_tsv(str_c(dir,fname),
+                        col_names = c("PAIR_ID",
+                                      "ref_genome",
+                                      "ISO1", 
+                                      "ISO2"))
+
+ref_genomes <- ref_genomes %>%
+  mutate(ref_genome = dirname(ref_genome)) 
+glimpse(ref_genomes)
+
+df_large_deletions <- df_large_deletions %>%
+  left_join(ref_genomes) %>%
+  dplyr::rename(mapping_ref = ref_genome) 
+```
+
+### Update combined file
+
+```{r}
+df_genetic_changes <- df_snippy %>%
+  full_join(df_large_deletions) %>%
+  arrange(PAIR_ID, mutation_id) %>%
+  relocate(mutation_id, PAIR_ID, ISO1, ISO2, ISOLATE, mapping_ref, CHROM, source_type, START, END, CHANGE_NT_LENGTH, LENGTH_before)
+
+rm(df_snippy, df_large_deletions)
+```
+
+## Format IS insertions
+
+```{r}
+dir <- "Within_host_analysis/processed_data/"
+df_IS_insertions <- readRDS(str_c(dir, "IS_insertions/df_IS_insertions_annotated.Rda"))
+
+df_IS_insertions <- df_IS_insertions %>%
+  mutate(EFFTYPE_SHORT = if_else(annotation_type == "coding",
+                                 "IS insertion (intragenic)",
+                                 "IS insertion (intergenic)")) %>%
+  filter(!(EFFTYPE_SHORT == "IS insertion" & is.na(LOCUS_TAG))) %>%
+  select(mutation_id, PAIR_ID, ISO1, ISO2, ISOLATE, CHROM, START, END, CHANGE_NT_LENGTH = length, IS_annotation_type, insertion_pair_id, EFFTYPE_SHORT, NT_POS = distance_from_start_nt, AA_POS = distance_from_start_aa, LOCUS_TAG, PRODUCT, GENE, distance_from_flanking_prot, mutation_position_to_flanking_prot, flanking_prot_position_to_mutation)
+```
+
+### Add mapping reference
+
+```{r}
+df_IS_insertions <- df_IS_insertions %>%
+  left_join(ref_genomes) %>%
+  dplyr::rename(mapping_ref = ref_genome) 
+```
+
+
+### Update combined file
+
+```{r}
+df_genetic_changes <- df_genetic_changes %>%
+  full_join(df_IS_insertions) %>%
+  arrange(PAIR_ID, mutation_id) %>%
+   relocate(mutation_id, PAIR_ID, ISO1, ISO2, ISOLATE, mapping_ref, CHROM, source_type, START, END, CHANGE_NT_LENGTH, LENGTH_before, IS_annotation_type)
+
+rm(df_IS_insertions)
+```
+
+# Part 2: add multi-layered annotation of coding regions
+
+At this stage we can add:
+- global cd-hit cluster (amino acid clustering)
+- FPR3757 locus tag (based on the best hit with blastp for each cd-hit cluster)
+- aureowiki annotation
+- operons 
+- COG
+- GO
+- promoters (TTS Emote)
+- RNA features (Maeder, PLoS Genetics 2016)
+
+## Cd-hit clustering
+
+### List of locus tags to generate a multifasta of proteins
+
+```{r}
+gene_list <- df_genetic_changes %>%
+  drop_na(LOCUS_TAG) %>%
+  ungroup() %>%
+  distinct(PAIR_ID, mapping_ref, LOCUS_TAG) %>%
+  mutate(mapping_ref = str_remove(mapping_ref, ".gbk"))
+```
+
+### Construct a table with mapping reference and absolute path to the genbank file
+
+```{r}
+# reference genomes
+f <- "~/Documents/Transfer_with_server/genetic_pairs_refgenomes_with_fullpath.tab"
+fname <- basename(f)
+file.copy(f, dir, overwrite = F)
+refgenome_pattern <- "GCF_\\d+.\\d"
+ref_genomes_with_path <- read_tsv(str_c(dir, fname),
+                                  col_names = c("PAIR_ID",
+                                                "full_path",
+                                                "mapping_ref")) %>%
+  mutate(mapping_ref = str_extract(mapping_ref, refgenome_pattern))
+
+glimpse(ref_genomes_with_path)
+
+
+# internal reference
+f <- "~/Documents/Transfer_with_server/internal_ref.tab"
+fname <- basename(f)
+dir <- "Within_host_analysis/raw_data/"
+file.copy(f, dir, overwrite = F)
+internal_ref <- read_tsv(str_c(dir, fname), col_names = c("PAIR_ID", "full_path", "mapping_ref")) %>%
+  mutate(mapping_ref = str_remove(mapping_ref, ".gbk"))
+
+df_mapping_ref <- ref_genomes_with_path %>%
+  full_join(internal_ref) %>%
+  arrange(PAIR_ID)
+glimpse(df_mapping_ref)
+```
+
+### Export table with locus tag and path to reference
+
+```{r}
+gene_list <- gene_list %>%
+  left_join(df_mapping_ref) %>%
+  select(LOCUS_TAG, mapping_ref, full_path)
+glimpse(gene_list)
+
+gene_list %>%
+  write_tsv("~/Documents/Transfer_with_server/combined_annotation_mutated_genes.tab", col_names = F)
+
+rm(df_mapping_ref, internal_ref, ref_genomes)
+```
+
+### First layer of annotation: cd hit clusters 
+
+Here we construct the first layer of annotation of our mutated genes: the output of cd-hit of protein sequences (default parameters). We use two tabular files:
+- cdhit ouput with cluster id and cluster stats for each mutated gene
+- protein sequences of each cluster representative
+
+#### Cd-hit output
+
+```{r}
+dir <- "Within_host_analysis/raw_data/combined_annotation/"
+dir.create(dir)
+f <- "~/Documents/Transfer_with_server/all_mutated_genes.cd-hit.tab"
+fname <- basename(f)
+file.copy(f, dir, overwrite = F)
+cdhit_clusters <- read_tsv(str_c(dir, fname))
+glimpse(cdhit_clusters)
+
+# Here we have a list of 21 gene loci where cd-hit clustering failed. Needs to be re-assessed
+setdiff(gene_list$LOCUS_TAG, cdhit_clusters$id)
+
+rm(f, fname, gene_list)
+```
+
+As we can see, the clustering information is missing for 21 mutated genes. *We will need to check the reason for this later (issue with sequence extraction? issue with cd-hit?)*
+
+#### Amino acid sequence of cluster representatives 
+
+```{r}
+f <- "~/Documents/Transfer_with_server/all_mutated_genes.cd-hit.representative.tab"
+fname <- basename(f)
+file.copy(f, dir, overwrite = F)
+cdhit_representative <- read_tsv(str_c(dir, fname), col_names = c("FASTA_ID", "SEQUENCE"))
+glimpse(cdhit_representative)
+
+rm(f, fname)
+```
+
+#### Construct the first layer of annotation
+
+```{r}
+df_representative <- cdhit_clusters %>%
+  filter(clstr_rep == 1) %>%
+  distinct(clstr, id) %>%
+  left_join(cdhit_representative, by = c("id" = "FASTA_ID")) %>%
+  dplyr::rename(cdhit_cluster_representative = id)
+
+df_cdhit <- cdhit_clusters %>%
+  left_join(df_representative) %>%
+  transmute(LOCUS_TAG = id,
+            cluster_id = str_c("cdhit-",
+                               formatC(clstr, digits = 3, format = "d", flag = "0")),
+            clstr, clstr_size, GENE_LENGTH = length, cdhit_cluster_representative, clstr_iden, clstr_cov, clstr_sequence = SEQUENCE)
+skimr::skim(df_cdhit)
+
+rm(cdhit_clusters, cdhit_representative, df_representative)
+```
+
+### Second layer of annotation: matched genes in FPR3757 (based on blastp)
+
+#### blastp output
+
+```{r}
+f <- "~/Documents/Transfer_with_server/all_mutated_genes.cd-hit.blastp.tab"
+fname <- basename(f)
+file.copy(f, dir, overwrite = F)
+
+col_names <- c("QUERY", "SUBJECT", "PIDENT", "ALIGNLEN", "MISMATCH", "GAPS", "QSTART", "QEND", "SSTART", "SEND", "EVALUE", "BITSCORE", "QLEN")
+blastp_data <- read_tsv(str_c(dir, fname), col_names = col_names)
+glimpse(blastp_data)
+skimr::skim(blastp_data)
+
+rm(f, fname, col_names)
+```
+
+#### Construct the second layer of annotation
+
+```{r}
+df_blastp <- blastp_data %>%
+  mutate(PCOV = ALIGNLEN/QLEN*100) # we need to calculate the coverge here because the qcov* variables in blastp don't represent coverage as calculated here (checked manually looking at local alignments)
+
+df_blastp %>%
+  ggplot(aes(x = PCOV)) +
+  geom_histogram() +
+  theme_bw()
+
+df_blastp %>%
+  ggplot(aes(x = PIDENT)) +
+  geom_histogram() +
+  theme_bw()
+
+df_blastp %>%
+  mutate(iden90 = PIDENT >= 90) %>%
+  ggplot(aes(x = PCOV)) +
+  geom_histogram() +
+  facet_wrap(~iden90) +
+  labs(title = "%COVERAGE according to whether %ID is >=90%") +
+  theme_bw()
+```
+
+Here is an attempt to filter these blast matches. First, we remove matches with less than 90% amino acid identity and 50% coverage. Second, we sort the remaining matches by descreasing identity and decreasing coverage and select the top match. 
+
+**These threshold need to be re-assessed.**
+
+```{r}
+df_blastp <- df_blastp %>%
+  filter(PIDENT >=90 & PCOV >= 50) %>%
+  arrange(QUERY, desc(PIDENT, PCOV)) %>%
+  group_by(QUERY) %>%
+  slice_head(n = 1) %>%
+  select(cdhit_cluster_representative = QUERY, neb_locus_tag = SUBJECT, clstr_sequence_length = QLEN, PIDENT, PCOV)
+
+# check for duplicates
+df_blastp %>%
+  group_by(cdhit_cluster_representative) %>%
+  filter(n() > 1)
+
+rm(blastp_data)
+```
+
+#### Combine first and second layer of annotation in one file
+
+```{r}
+df_multi_annotation <- df_cdhit %>%
+  left_join(df_blastp)
+
+rm(df_cdhit, df_blastp)
+```
+
+### Third layer of annotation: neb annotation including aureowiki and microbeonline operons
+
+```{r}
+f <- "../Within_host_meta_analysis/Patient_episode_analysis/processed_data/combined_annotation/df_neb_curated.Rda"
+fname <- basename(f)
+file.copy(f, dir, overwrite = F)
+
+df_neb_curated <- readRDS(str_c(dir,fname))
+
+```
+
+Generate a unique label for genes
+
+if pan gene symbol available -> pan gene symbol
+if neb locus tag available -> neb locus tag
+otherwise cd-hit cluster
+
+Genearte a unique label for operons
+
+sequence of gene symbols in the order as they are in FPR3757
+
+```{r}
+df_neb_curated <- df_neb_curated %>%
+  group_by(neb_locus_tag) %>%
+  mutate(neb_gene_symbol = case_when(
+    pan_gene_symbol != "-" ~ pan_gene_symbol,
+    pan_gene_symbol == "-" ~ neb_locus_tag,
+    is.na(pan_gene_symbol) ~ neb_locus_tag
+  )) %>%
+  arrange(neb_locus_tag) %>%
+  
+  # annotate operons
+  group_by(operon_id) %>%
+  mutate(neb_operon_symbol = if_else(n() > 1, 
+                                     str_c(neb_gene_symbol, collapse = "-"), 
+                                     NA_character_
+  )) %>%
+  
+  # generate operon coordinates in FPR3757
+  mutate(neb_operon_strand = str_c(unique(neb_strand), collapse = ","),
+         neb_operon_start = min(neb_start),
+         neb_operon_end = max(neb_end),
+         neb_operon_length = neb_operon_end - neb_operon_start,
+         neb_operon_genes_count = n_distinct(neb_locus_tag),
+         neb_operon_gene_position = if_else(neb_operon_strand == "+",
+                                            row_number(),
+                                            rev(row_number())),
+         neb_operon_gene_start = if_else(neb_operon_strand == "+",
+                                         neb_start - neb_operon_start,
+                                         neb_operon_end - neb_end),
+         neb_operon_gene_end = if_else(neb_operon_strand == "+",
+                                         neb_end - neb_operon_start,
+                                         neb_operon_end - neb_start))
+```
+
+
+#### Update multi-layered annotation file
+
+```{r}
+df_multi_annotation <- df_multi_annotation %>%
+  left_join(df_neb_curated) %>%
+  # Generate a unique label for cdhit clusters
+  group_by(cluster_id) %>%
+  mutate(cluster_symbol = if_else(!is.na(neb_gene_symbol),
+                                  neb_gene_symbol,
+                                  cluster_id))
+```
+
+
+#### Construct fourth layer of annotation and add to the multi-layered annotation file
+
+```{r}
+# df_multi_annotation <- df_multi_annotation %>%
+#   left_join(df_operon) %>%
+#   left_join(df_operon_microbes_online_long) %>%
+#   mutate(cluster_symbol = pan_gene_symbol) %>%
+#   mutate(cluster_symbol = if_else(cluster_symbol == "-" | is.na(cluster_symbol), neb_gene, cluster_symbol)) %>%
+#   mutate(cluster_symbol = if_else(is.na(cluster_symbol), cluster_id, cluster_symbol)) %>%
+#   relocate(LOCUS_TAG, cluster_symbol, genome2d_operon, microbes_online_operon_id)
+
+# rm(df_operon, df_operon_genome2d, df_operon_microbes_online)
+  
+```
+
+
+
+### Sixth layer of annotation: promoters
+
+Here we add the intergenic mutations / IS insertions together with predicted promoters (if existing)
+
+```{r}
+f <- "~/Documents/Transfer_with_server/all_snps.promoters.bed"
+file.copy(f, dir, overwrite = F)
+
+df_mutations_promoters <- read_tsv(str_c(dir, basename(f)), col_names = c("CHROM_prom", "START_prom", "END_prom", "promoter_id", "score", "STRAND_prom", "SSTART", "SSEND", "CHROM", "START", "END", "PAIR_ID" ))
+
+df_mutations_promoters <- df_mutations_promoters %>%
+   select(PAIR_ID, CHROM, START = END, promoter_id, promoter_strand = STRAND_prom, promoter_start = START_prom, promoter_end = END_prom )
+
+f <- "~/Documents/Transfer_with_server/all_primary.intergenic.promoters.bed"
+file.copy(f, dir, overwrite = F)
+
+df_insertions_promoters <- read_tsv(str_c(dir, basename(f)), col_names = c("CHROM_prom", "START_prom", "END_prom", "promoter_id", "score", "STRAND_prom", "SSTART", "SSEND", "CHROM", "START", "END", "mutation_id","CHANGE_NT_LENGTH", "alignment_type", "PAIR_ID", "ISOLATE" ))
+
+df_insertions_promoters <- df_insertions_promoters %>%
+   select(PAIR_ID, CHROM, START, promoter_id, promoter_strand = STRAND_prom, promoter_start = START_prom, promoter_end = END_prom )
+
+# combine in one dataframe
+df_promoters_annot <- full_join(df_mutations_promoters,
+                                df_insertions_promoters)
+
+df_promoters_annot_converg <- df_promoters_annot %>%
+  group_by(promoter_id) %>%
+  mutate(n_events = n_distinct(PAIR_ID)) %>%
+  distinct()
+
+rm(df_mutations_promoters, df_insertions_promoters, df_promoters_annot_converg)
+``` 
+
+# Final combined annotation dataframe
+
+```{r}
+df_changes_multi_annotated <- df_genetic_changes %>%
+  left_join(df_multi_annotation) %>%
+  relocate(neb_gene_symbol, cluster_symbol, neb_operon_symbol, .after = mapping_ref) %>%
+  left_join(df_promoters_annot)
+
+rm(df_multi_annotation)
+```
+
+Re-annotate mutations with position within the operon
+
+```{r}
+df_changes_multi_annotated <- df_changes_multi_annotated %>%
+  group_by(neb_operon_symbol) %>%
+  mutate(operon_position = case_when(
+    neb_operon_strand == "+" & !is.na(NT_POS) ~ neb_start - neb_operon_start + NT_POS,
+    neb_operon_strand == "-" & !is.na(NT_POS) ~  neb_operon_end - neb_end + NT_POS,
+    neb_operon_strand == "+" & !is.na(distance_from_flanking_prot) ~ neb_start - neb_operon_start + distance_from_flanking_prot,
+    neb_operon_strand == "-" & !is.na(distance_from_flanking_prot) ~  neb_operon_end - neb_end + distance_from_flanking_prot,
+  ))
+
+# df_changes_multi_annotated %>%
+#   filter(str_detect(neb_operon_symbol, "agr")) %>%
+#   View()
+
+# df_changes_multi_annotated %>%
+#   filter(str_detect(neb_operon_symbol, "cap")) %>%
+#   View()
+```
+
+# Supp table for the paper
+
+```{r}
+# supp_table_mutations_prepare <- df_changes_multi_annotated %>%
+#   select(mutation_id, mutation_compartment, episode_id = patient_episode_unique, mapping_ref, internal_ref, CHROM, START, END, CHANGE_NT_LENGTH, is_family, REF, ALT, MUTTYPE, EFFTYPE_SHORT, MUTATION_SHORT, LOCUS_TAG, GENE, PRODUCT, flanking_prot_position_to_mutation, mutation_position_to_flanking_prot, distance_from_flanking_prot, cluster_symbol, operon_id = microbes_online_operon_id, cdhit_cluster_id = cluster_id, cdhit_cluster_aa_sequence = clstr_sequence, Sa_FPR3757_locus_tag = neb_locus_tag, Sa_FPR3757_gene_start = neb_start, Sa_FPR3757_gene_end = neb_end, TSS_EMOTE_promoter_id = promoter_id, promoter_strand, promoter_start, promoter_end) %>%
+#   distinct()
+```
+
+# Write to separate excel spreadsheets
+
+```{r}
+# supp_table_mutations_prepare_list <- supp_table_mutations_prepare %>%
+#   mutate(group = case_when(
+#     str_detect(mutation_id, "MUT") ~ "point mutations",
+#     str_detect(mutation_id, "DEL") ~ "large deletions",
+#     str_detect(mutation_id, "SPLITTER") ~ "IS insertions"
+#   )) %>%
+#   ungroup() %>%
+#   group_split(group)
+# 
+# # Use the value from the "Species" column to provide a name for the list members
+# supp_table_mutations_prepare_list %>%
+#   purrr::map(~pull(.,group)) %>% # Pull out Species variable
+#   purrr::map(~as.character(.)) %>% # Convert factor to character
+#   purrr::map(~unique(.)) -> names(supp_table_mutations_prepare_list) # Set this as names for list members
+# 
+# supp_table_mutations_prepare_list <- supp_table_mutations_prepare_list %>%
+#   purrr::map(~select(., -group))
+# 
+# supp_table_mutations_prepare_list <- supp_table_mutations_prepare_list[c("point mutations", "IS insertions", "large deletions")]
+
+```
+
+
+
+# Save processed data
+
+```{r}
+dir <- "Within_host_analysis/processed_data/combined_annotation/"
+dir.create(dir)
+
+df_changes_multi_annotated %>%
+  saveRDS(str_c(dir, "df_changes_multi_annotated.Rda"))
+df_changes_multi_annotated %>%
+  write_csv(str_c(dir, "df_changes_multi_annotated.csv"))
+
+df_neb_curated %>%
+  saveRDS(str_c(dir, "df_neb_curated_with_gene_symbols_operon_coordinates.Rda"))
+
+# supp_table_mutations_prepare_list %>%
+#   writexl::write_xlsx(str_c(dir, "supp_table_mutations_prepare.xlsx"))
+```
+

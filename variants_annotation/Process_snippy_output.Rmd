@@ -1,0 +1,277 @@
+---
+title: 'Create a clean list of mutations with mutated proteins and intergenic regions annotated'
+author: "Stefano Giulieri"
+date: "07/04/2020"
+output: html_document
+---
+
+Here, we process the output of snippy and snippy mask
+
+```{r setup, include=F}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = here::here())
+msg <- glue::glue("My directory is {here::here()}")
+message(msg)
+setwd(here::here())
+```
+
+```{r message=F}
+library(tidyverse)
+rm(list = ls())
+```
+
+
+# Snippy output
+
+```{r}
+f <- "~/Documents/Transfer_with_server/all_related.snps.mask.tab"
+fname <- basename(f)
+dir <- "Within_host_analysis/raw_data/snippy/"
+
+file.copy(f, str_c(dir), overwrite = T)
+
+df_snippy_raw <- read_tsv(str_c(dir, fname))
+
+# check for duplicates
+df_snippy_raw %>% group_by_all() %>% filter(n() > 1)
+```
+
+# Modify snippy output
+
+Preliminary checks
+
+```{r}
+# check that ISO2 (pair file) and ISOLATE (snippy output) are identical
+setequal(df_snippy_raw$ISO2, df_snippy_raw$ISOLATE)
+# check that ISO1 and REFERENCE point to the same isolate
+setequal(df_snippy_raw$ISO1, str_remove(df_snippy_raw$REFERENCE, ".gbk"))
+```
+
+
+```{r}
+source("../Functions/aa_convert.R")
+df_snippy_clean <- df_snippy_raw %>%
+  separate(EFFECT, 
+           into = c("EFFTYPE", "NUCLEOTIDE_CHANGE", "MUTATION"), 
+           sep = "\\s", 
+           remove = T, 
+           extra = "merge") %>%
+  mutate(NUCLEOTIDE_CHANGE = str_remove(NUCLEOTIDE_CHANGE, "c."),
+         MUTATION = str_remove(MUTATION, "p."),
+         MUTATION_SHORT = aa_convert(MUTATION)) %>%
+  separate(AA_POS, 
+           into = c("AA_POS", "AA_LENGTH"), 
+           sep = "/", 
+           remove = T) %>%
+  separate(NT_POS, 
+           into = c("NT_POS", "NT_LENGTH"), 
+           sep = "/", 
+           remove = T) %>%
+  mutate_at(vars(starts_with(c("AA", "NT"))), 
+            as.numeric) %>%
+  # calculate length of indels
+  mutate(CHANGE_NT_LENGTH = str_length(ALT) - str_length(REF),
+         CHANGE_AA_LENGTH = if_else(!is.na(AA_LENGTH), CHANGE_NT_LENGTH/3, NA_real_))
+
+# classify mutations
+df_snippy_clean <- df_snippy_clean %>%
+  mutate(MUTTYPE = if_else(TYPE %in% c("snp", "mnp", "complex"), "substitution", "indel")) %>%
+  mutate(EFFTYPE_SHORT = case_when(
+    FTYPE != "CDS"| is.na(FTYPE) | EFFTYPE == "intergenic_region" ~ "intergenic",
+    EFFTYPE == "synonymous_variant" ~ "synonymous",
+    str_detect(EFFTYPE, "missense_variant|inframe") ~ "non-synonymous",
+    str_detect(EFFTYPE, "frameshift|stop") | EFFTYPE %in% c("start_lost", "initiator_codon_variant") ~ "truncating"
+  )) %>%
+  relocate(MUTTYPE, .after = TYPE)
+
+df_snippy_clean %>%
+  count(MUTTYPE, EFFTYPE_SHORT, EFFTYPE) %>%
+  knitr::kable(row.names = T)
+rm(df_snippy_raw, aa_convert)
+```
+
+Now generate the mutation id
+
+```{r}
+df_snippy_clean <- df_snippy_clean %>%
+  group_by(PAIR_ID, CHROM, POS) %>%
+  mutate(mutation_id = str_c("MUT-", formatC(cur_group_id(), width = 4, format = "d", flag = "0"))) %>%
+  relocate(mutation_id)
+```
+
+# Intergenic regions
+
+# Import mutated intergenic regions
+
+```{r}
+f <- "~/Documents/Transfer_with_server/all_related_mutated_intergenic_regions.bed"
+fname <- basename(f)
+file.copy(f, str_c(dir), overwrite = F)
+
+mutated_intergenic_regions <- read_tsv(str_c(dir, fname),
+                                       col_names = c("CHROM_reg", "START_reg", "END_reg", "CHROM", "POS_minus_1", "POS", "PAIR_ID", "ISO1", "ISO2")) %>%
+  select(-c(ISO1, ISO2,POS_minus_1))
+
+# check duplicates
+mutated_intergenic_regions %>%
+  group_by_all() %>%
+  filter((n() > 1))
+```
+
+# Import and process annotations of intergenic regions
+
+```{r}
+f <- "~/Documents/Transfer_with_server/all_related_mutated_intergenic_regions_annotated.tab"
+fname <- basename(f)
+file.copy(f, str_c(dir), overwrite = F)
+col_names <- c("PAIR_ID",
+               "ISO1",
+               "ISO2",
+               "CHROM_protein", 
+               "SOURCE", 
+               "TYPE", 
+               "START_flank_prot", 
+               "END_flank_prot", 
+               "SCORE", 
+               "STRAND_flank_prot", 
+               "PHASE", 
+               "ATTRIBUTES_flank_prot",  
+               "CHROM_reg",
+               "START_reg",
+               "END_reg")
+intergenic_annotated <- read_tsv(str_c(dir, fname), col_names = col_names) %>%
+  select(PAIR_ID, CHROM_protein, START_flank_prot, END_flank_prot, STRAND_flank_prot, ATTRIBUTES_flank_prot, CHROM_reg, START_reg, END_reg)
+
+# check duplicates
+intergenic_annotated %>%
+  group_by_all() %>%
+  filter((n() > 1))
+# these duplicates (n=98) results from two or more mutations in the same intergenic region. They can be safely discarded
+
+intergenic_annotated <- distinct(intergenic_annotated)
+```
+
+Process ATTRIBUTES columns of the gff file
+
+```{r}
+source("../Functions/gff_utilities.R")
+
+df_intergenic_annotated <- intergenic_annotated %>%
+  dplyr::rename(ATTRIBUTES = ATTRIBUTES_flank_prot) %>%
+  gff_to_tab()
+```
+
+# annotate presence of potential promoter / terminator
+
+```{r}
+df_intergenic_annotated <- df_intergenic_annotated %>%
+  mutate(prot_position = case_when(
+    START_flank_prot < START_reg & STRAND_flank_prot == "-" ~ "left-promoter",
+    START_flank_prot < START_reg & STRAND_flank_prot == "+" ~ "left-terminator",
+    START_flank_prot > START_reg & STRAND_flank_prot == "+" ~ "right-promoter",
+    START_flank_prot > START_reg & STRAND_flank_prot == "-" ~ "right-terminator"
+  ))
+
+rm(intergenic_annotated)
+```
+
+# Merge with list of mutations in intergenic regions
+
+```{r}
+df_mutated_intergenic_regions <- mutated_intergenic_regions %>%
+  left_join(df_intergenic_annotated) %>%
+  mutate(distance_from_flanking_prot = case_when(
+    prot_position == "left-promoter" ~ (END_flank_prot - POS),
+    prot_position == "left-terminator" ~ (POS - END_flank_prot),
+    prot_position == "right-promoter" ~ (POS - START_flank_prot),
+    prot_position == "right-terminator" ~ (END_flank_prot - POS)
+  ))%>%
+   separate(prot_position, into = c("flanking_prot_position_to_mutation", "mutation_position_to_flanking_prot")) 
+
+df_mutated_intergenic_regions <- df_mutated_intergenic_regions %>%
+  select(PAIR_ID, CHROM, POS, CHROM_reg, START_reg, END_reg, START_flank_prot, END_flank_prot, STRAND_flank_prot, LOCUS_TAG = locus_tag, GENE =gene, PRODUCT = product, faa_seq = translation, flanking_prot_position_to_mutation, mutation_position_to_flanking_prot, distance_from_flanking_prot)
+
+df_mutated_intergenic_regions %>%
+  group_by_all() %>%
+  filter(n() > 1)
+
+rm(mutated_intergenic_regions, df_intergenic_annotated)
+```
+
+# Create flat file (one line - one intergenic mutation)
+
+```{r}
+df_up <- df_mutated_intergenic_regions %>%
+  filter(str_detect(flanking_prot_position_to_mutation, "left")) %>%
+  rename_at(vars(START_flank_prot:distance_from_flanking_prot),
+            ~str_c(., "_left"))
+df_down <- df_mutated_intergenic_regions %>%
+  filter(str_detect(flanking_prot_position_to_mutation, "right")) %>%
+  rename_at(vars(START_flank_prot:distance_from_flanking_prot),
+            ~str_c(., "_right"))
+df_mutated_intergenic_regions_flat <- df_up %>%
+  full_join(df_down)
+
+# check for duplicates
+df_mutated_intergenic_regions_flat %>%
+  group_by_all() %>%
+  filter(n() > 1)
+
+rm(df_up, df_down)
+```
+
+# Add to snippy df: one line per mutation
+
+```{r}
+df_snippy_clean_intergenic_flat <- df_snippy_clean %>%
+  left_join(df_mutated_intergenic_regions_flat)
+
+# check for duplicates
+df_snippy_clean_intergenic_flat %>%
+  group_by(mutation_id) %>%
+  filter(n() > 1) 
+
+
+rm(df_mutated_intergenic_regions_flat)
+```
+
+# Add to snippy df: two lines for intergenic mutations
+
+
+```{r}
+diff_colnames <- setdiff(colnames(df_snippy_clean), colnames(df_mutated_intergenic_regions))
+
+df_snippy_clean_with_intergenic_annotations <- df_snippy_clean %>%
+  filter(FTYPE != "CDS" | is.na(FTYPE)) %>%
+  select(all_of(diff_colnames)) %>%
+  left_join(df_mutated_intergenic_regions)%>%
+  full_join(df_snippy_clean) %>%
+  arrange(PAIR_ID, CHROM, POS)
+
+# To check that the merging worked we extract all genes with at least one mutation in the coding region and one in the (presumed) promoter region
+df_snippy_clean_with_intergenic_annotations %>%
+  drop_na(GENE) %>%
+  group_by(GENE) %>%
+  filter(any(distance_from_flanking_prot %in% -500:0) & any(FTYPE == "CDS")) %>%
+  arrange(GENE) %>%
+  View()
+
+rm(df_mutated_intergenic_regions)
+```
+
+# Save processed data
+
+```{r}
+dir <- "Within_host_analysis/processed_data/snippy/"
+dir.create(dir)
+
+df_snippy_clean %>%
+  saveRDS(str_c(dir, "df_snippy_clean.Rda"))
+
+df_snippy_clean_with_intergenic_annotations %>%
+  saveRDS(str_c(dir, "df_snippy_clean_with_intergenic_annotations.Rda"))
+
+df_snippy_clean_intergenic_flat %>%
+  saveRDS(str_c(dir, "df_snippy_clean_intergenic_flat.Rda"))
+```
+
