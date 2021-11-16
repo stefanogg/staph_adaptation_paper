@@ -1,0 +1,21 @@
+# Annotate intergenic mutations
+snippy-annotate-intergenic2.sh <mask-mutations.sh-episode-id-directory>
+
+# Annotate intergenc IS insertions
+annotate-splitters-intergenic.sh <annotate-splitters-episode-id-directory>
+
+# Identify intergenic mutations in promoter regions
+map-promoters.sh <snippy-annotate-intergenic-episode-id-directory>
+
+# Identify intergenic IS insertions in promoter regions
+annotate-splitters-intergenic.sh <annotate-splitters-episode-id-directory>
+
+# Extract mutated genes from the references
+prepare-ref-genomes.sh
+extract-gene-sequence.sh
+
+# Run cd-hit
+
+# Run blastp to identify FPR3757 homologs
+
+# Combine all mutations and their annotation in R (Combined_annotation.Rmd)
