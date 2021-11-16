@@ -16,7 +16,6 @@ usage () {
 	echo "USAGE"
 	echo " $0 [options] <directory with bwa coverage output for the episode>"
 	echo "OPTIONS:"
-	echo " -S : directory with split break output"
 	echo " -f : force"
 	echo " -R : resume"
 	echo "Please run this script in conda snippy environment"
@@ -35,7 +34,6 @@ RESUME=false
 while getopts 'S:fR' option
 do
 	case $option in
-		S) SPLIT_DIR=$OPTARG ;;
 		f) FORCE=true ;;
 		R) RESUME=true ;;
 	esac
@@ -47,7 +45,6 @@ shift $((OPTIND-1))
 # Create main directory
 DIR=$(readlink -e $1)
 GROUP_ID=$(basename $1)
-SPLIT_DIR=$(readlink -e $SPLIT_DIR)
 
 # check if group directory exists and remove if true (later to be replaced by --force option)
 if [ -d $GROUP_ID ]
@@ -113,12 +110,6 @@ do
 #	bedtools subtract -a $ISO.cnv.stop.bed -b ../internal_ref/$INTERNAL_REF.cnv.stop.bed > $ISO.mask.cnv.stop.bed
 	bedtools subtract -a $ISO.cnv.excision.pairs.bed -b ../internal_ref/$INTERNAL_REF.cnv.excision.pairs.bed > $ISO.mask.cnv.excision.pairs.bed
 	cd ..
-done
-
-# Generate a bed file for annotate-splitters
-for ISO in $(cat isolates.txt)
-do 
-	cut -f4,5,16 $ISO/$ISO.mask.cnv.excision.pairs.bed | awk '$3>$2' | bedtools merge -i stdin | sed "s/$/\t$ISO/" >> $GROUP_ID.mask.cnv.excision.pairs.bed
 done
 
 # Go back to main directory
