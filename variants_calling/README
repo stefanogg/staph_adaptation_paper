@@ -21,5 +21,7 @@ extract-splitters.sh <bwa-episode-id-directory>
 run-split-break.sh <pair splitters dir> <internal reference>
 
 # Annotate split reads with IS insertions
+run-annotate-splitters.sh <split-break-episode-id-directory>
 
 # Get copy number variants
+run-cnv-counter.sh <bwa coverage output for the episode> # usually detect-deletions.sh output directory 
