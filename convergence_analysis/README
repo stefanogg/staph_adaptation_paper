@@ -1,0 +1,12 @@
+# Run gene/operon convergence analysis
+# Generate input files using the R markdown file 2-Gene_convergence_analysis.Rmd and 5-Operon_convergence_analysis.Rmd
+
+# Conda R environment
+
+for i in all colonising-colonising colonising-invasive invasive-invasive;
+	do cd $i;
+	Rscript ../../gsea-auto-dfcorrected-second-time.R all.gene_info.txt $i.mut_info.txt all.ontologies.txt $i.replacement 1> $i.replacement.count.txt 2> $i.replacement.count.txt;
+	cd ..;
+done
+
+# Generate datasets and figures using the R markdown files 3-Gene_convergence_generate_dataset.Rmd, 4-Gene_convergence_figures.Rmd, 6-Operon_convergence_generate_dataset.Rmd, 7-Operon_convergence_figures.Rmd
