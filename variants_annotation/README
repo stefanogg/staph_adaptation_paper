@@ -13,8 +13,12 @@ annotate-splitters-intergenic.sh <annotate-splitters-episode-id-directory>
 # Extract mutated genes from the references
 prepare-ref-genomes.sh
 extract-gene-sequence.sh
+cat */*.faa > all_mutated_genes.faa
 
 # Run cd-hit
+cd-hit -i all_mutated_genes.faa -o all_mutated_genes.cdhit -d 50 > cdhit.log 
+clstr2txt.pl all_mutated_genes.cdhit.clstr > all_mutated_genes.cdhit.tab
+seqkit fx2tab -i all_mutated_genes.cdhit > all_mutated_genes.cdhit.representative.tab
 
 # Run blastp to identify FPR3757 homologs
 
