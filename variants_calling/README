@@ -1,0 +1,25 @@
+# Call point mutations using snippy (episode-specific calling)
+run-snippy-analysis.sh <episode-id-directory> # The directory <episode-id> must contain: tab-separated file with iso-name/R1/R2, reference folder with reference in genbank format
+
+# Mask variants from reference reads and positions where reference reads have low coverage
+mask-variants.sh <snippy-episode-id-directory>
+
+# Get structural variants
+
+# Map reads on closed genome using bwa mem
+bwa index <ref-name>.fa
+bwa mem -t 8 reference/ref.fa R1 R2 | samtools sort -@ 8 > <iso-name>.bam
+samtools index <iso-name>.bam
+
+# Get reads coverage and detect large deletions
+detect-deletions.sh <bwa-episode-id-directory>
+
+# Get split reads
+extract-splitters.sh <bwa-episode-id-directory>
+
+# Get IS insertions from split reads
+run-split-break.sh <pair splitters dir> <internal reference>
+
+# Annotate split reads with IS insertions
+
+# Get copy number variants
