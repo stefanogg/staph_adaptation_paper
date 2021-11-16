@@ -18,4 +18,6 @@ extract-gene-sequence.sh
 
 # Run blastp to identify FPR3757 homologs
 
+# Process mutations and structural variants in R
+
 # Combine all mutations and their annotation in R (Combined_annotation.Rmd)
