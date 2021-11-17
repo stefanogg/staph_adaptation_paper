@@ -59,65 +59,7 @@ df_mutated_genes <- df_gsea_neb_with_mutations %>%
   distinct(patient_episode_unique, mutation_compartment, neb_gene_symbol) 
 ```
 
-
-
-
-
-<!-- # Generate list of pairs -->
-
-<!-- ```{r} -->
-<!-- x <- unique(df_mutated_genes$patient_episode_unique) -->
-<!-- list_pairs <- combn(x = x,  -->
-<!--                m = 2, -->
-<!--                simplify = F)  -->
-<!-- m_pairs <- combn(x = x,  -->
-<!--                m = 2, -->
-<!--                simplify = T)  -->
-<!-- m_pairs <- t(m_pairs) -->
-
-<!-- jaccard <- c() -->
-
-<!-- for (i in 1:nrow(m_pairs)){ -->
-<!--   id1 <- m_pairs[i, 1] -->
-<!--   id2 <- m_pairs[i, 2] -->
-
-<!--   a <- df_mutated_genes %>% -->
-<!--     filter(patient_episode_unique == id1) %>% -->
-<!--     .$cluster_id %>% -->
-<!--     unique() -->
-
-
-<!--    b <- df_mutated_genes %>% -->
-<!--     filter(patient_episode_unique == id2) %>% -->
-<!--     .$cluster_id %>% -->
-<!--     unique() -->
-
-
-<!--    intersect <- intersect(a, b) -->
-<!--    union <- union(a, b) -->
-
-<!--    j <- length(intersect)/length(union) -->
-
-<!--    jaccard[i] <- j -->
-<!-- } -->
-
-<!-- mean(jaccard) -->
-<!-- ``` -->
-
-<!-- ```{r} -->
-<!-- df_jaccard <- df_pairs %>% -->
-<!--   mutate(jaccard = jaccard) -->
-
-<!-- df_jaccard %>% -->
-<!--   skimr::skim(jaccard) -->
-<!-- ``` -->
-
-<!-- ```{r} -->
-
-<!-- ``` -->
-
-
-# By compartment
+# Compute Jaccard index by compartment
 
 ```{r}
 df_mutated_genes <- df_mutated_genes %>%
@@ -269,7 +211,7 @@ for (m in unique(df_jaccard_compart$mutation_compartment)){
 
 ## Overlay clinical data
 
-# TII
+# Type I>I variants
 
 ```{r}
 net <- jaccard_net %>%
@@ -358,96 +300,7 @@ df_plot %>%
   
 ```
 
-## Assess impact of duration of bacteaemia
-
-```{r}
- p1 <- ggraph(net, layout = "nicely") +
-  geom_edge_link(aes(colour = jaccard)) +
-  # geom_node_point(aes(size = centrality_betweenness(directed = F),
-  #                     colour = sab_duration)) +
-    geom_node_point(aes(size = centrality_degree(),
-                        colour = sab_duration)) +
-  scale_size_continuous(name = "Centrality (~number of connections)") +
-    scale_edge_color_viridis() +
-    labs(title = "TII mutations: duration of bacteraemia") +
-  theme_graph()
-  
-  print(p1)
-  
-
-
-df_centrality %>%
-  drop_na(sab_duration) %>%
-  ggplot(aes(x = sab_duration, y = centrality)) +
-  geom_point() +
-  theme_bw()
-
-df_centrality %>%
-   drop_na(sab_duration) %>%
-  ggplot(aes(x = centrality, fill = as.factor(sab_duration >= 7))) +
-  geom_density(alpha = .6) +
-  scale_fill_manual(values = c("blue", "red"), na.translate = F, name = "Bacteraemia >= 7 days", labels = c("No", "Yes")) +
-  theme_bw()
-```
-
-## Loop over all binary variables
-
-```{r}
-# var <- df_clinical %>%
-#   select(bacteraemia:neuro, pulmo, implant) %>%
-#   colnames()
-# 
-# for (v in var){
-#   
-#   s <- rlang::sym(v)
-#    
-#   p1 <- ggraph(net, layout = "nicely") +
-#   geom_edge_link(aes(colour = jaccard)) +
-#   # geom_node_point(aes(size = centrality_betweenness(directed = F),
-#   #                     colour = as.factor({{s}}))) +
-#     geom_node_point(aes(size = centrality_degree(),
-#                         colour = as.factor({{s}}))) +
-#   scale_size_continuous(name = "Centrality (~number of connections)") +
-#     scale_edge_color_viridis() +
-#    scale_color_manual(values = c("blue", "red")) +
-#     labs(title = str_c("TII mutations: ", v)) +
-#   theme_graph()
-#   
-#   # print(p1)
-#   # 
-# p2 <- df_centrality %>%
-#   ggplot(aes(x = centrality, fill = as.factor({{s}}))) +
-#   geom_density(alpha = .6) +
-#   scale_fill_manual(values = c("blue", "red"), na.translate = F, name = v, labels = c("No", "Yes")) +
-#   theme_bw()
-# 
-# 
-# 
-# df_plot <- df_mutations %>%
-#   dplyr::group_by(mutation_compartment, {{s}}, neb_gene_symbol, glm.pval, EFFTYPE_SHORT) %>%
-#   summarise(n_events = n_distinct(patient_episode_unique))
-# 
-# # p3 <- df_plot %>%
-# #   ggplot(aes(x = fct_reorder(neb_gene_symbol, glm.pval), y = n_events, fill = EFFTYPE_SHORT)) +
-# #   geom_bar(stat = "identity") +
-# #   facet_wrap(~as.factor({{s}})) +
-# #   coord_flip() +
-# #   theme_bw()
-# # 
-# # p <- p1 + (p2 / p3)
-# # 
-# # print(p)
-# 
-# p <- p1 / p2
-# 
-# # p <- p1 +( p2 / p3)
-# 
-# print(p)
-# 
-# }
-```
-
-## Construct the final figure for TII
+## Construct the final figure for type I>I variants
 
 ```{r}
 # Panel A: network
@@ -554,7 +407,7 @@ p6
 ```
 
 
-# TCC
+# Type C>C variants
 
 ```{r}
 net <- jaccard_net %>%
@@ -637,7 +490,7 @@ df_plot %>%
   theme_bw()
 ```
 
-## Construct the final figure for TCC
+## Construct the final figure for Type C>C variants
 
 ```{r}
 # Panel A: network
@@ -740,7 +593,7 @@ p7 <- wrap_plots(p5, p4.1, widths = c(4,6), nrow = 1) +
 p7
 ```
 
-# TCI
+# Type C>I variants
 
 ```{r}
 net <- jaccard_net %>%
@@ -846,63 +699,7 @@ df_plot %>%
   theme_bw()
 ```
 
-# Loop over clinical variables
-
-```{r}
-# var <- df_clinical %>%
-#   select(bacteraemia:neuro, pulmo, implant) %>%
-#   colnames()
-# 
-# for (v in var){
-#   
-#   s <- rlang::sym(v)
-#    
-#   p1 <- ggraph(net, layout = "nicely") +
-#   geom_edge_link(aes(colour = jaccard)) +
-#   geom_node_point(aes(size = centrality_betweenness(directed = F),
-#                       colour = as.factor({{s}}))) +
-#     # geom_node_point(aes(size = centrality_degree())) +
-#   scale_size_continuous(name = "Centrality (~number of connections)") +
-#     scale_edge_color_viridis() +
-#    scale_color_manual(values = c("blue", "red")) +
-#     labs(title = str_c("TII mutations: ", v)) +
-#   theme_graph()
-#   
-#   print(p1)
-#   
-# p2 <- df_centrality %>%
-#   ggplot(aes(x = centrality, fill = as.factor({{s}}))) +
-#   geom_density(alpha = .6) +
-#   scale_fill_manual(values = c("blue", "red"), na.translate = F, name = v, labels = c("No", "Yes")) +
-#   theme_bw()
-# 
-# 
-# 
-# df_plot <- df_mutations %>%
-#   dplyr::group_by(mutation_compartment, {{s}}, neb_gene_symbol, glm.pval, EFFTYPE_SHORT) %>%
-#   summarise(n_events = n_distinct(patient_episode_unique))
-# 
-# # p3 <- df_plot %>%
-# #   ggplot(aes(x = fct_reorder(neb_gene_symbol, glm.pval), y = n_events, fill = EFFTYPE_SHORT)) +
-# #   geom_bar(stat = "identity") +
-# #   facet_wrap(~as.factor({{s}})) +
-# #   coord_flip() +
-# #   theme_bw()
-# # 
-# # p <- p1 + (p2 / p3)
-# # 
-# # print(p)
-# 
-# p <- p1 / p2
-# 
-# # p <- p1 +( p2 / p3)
-# 
-# print(p)
-# 
-# }
-```
-
-## Construct the final figure for TCI
+## Construct the final figure for Type C>I variants
 
 ```{r}
 # Panel A: network
