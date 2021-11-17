@@ -11,8 +11,11 @@ map-promoters.sh <snippy-annotate-intergenic-episode-id-directory>
 annotate-splitters-intergenic.sh <annotate-splitters-episode-id-directory>
 
 # Extract mutated genes from the references
-prepare-ref-genomes.sh
-extract-gene-sequence.sh
+mkdir reference
+cd reference
+prepare-ref-genomes.sh <refgenome id> </path/to/refgenome> 
+cd ..
+extract-gene-sequence.sh <locus tag> <refgenome id> 
 cat */*.faa > all_mutated_genes.faa
 
 # Run cd-hit
@@ -21,6 +24,7 @@ clstr2txt.pl all_mutated_genes.cdhit.clstr > all_mutated_genes.cdhit.tab
 seqkit fx2tab -i all_mutated_genes.cdhit > all_mutated_genes.cdhit.representative.tab
 
 # Run blastp to identify FPR3757 homologs
+run-blastp.sh <all_mutated_genes.cdhit> <Sa_USA300_FPR3757.faa> <mutated_genes_cdhit_FPR3757_blastp>
 
 # Process mutations and structural variants in R (Process_snippy_output.Rmd, Process_deletions.Rmd, Process_IS_insertions.Rmd)
 
