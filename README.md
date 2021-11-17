@@ -3,7 +3,7 @@ Scripts to analyse within-host evolution during S. aureus colonisation and infec
 
 Note that the shell scripts should be run in one of the following conda environments:
 
-conda snippy (conda install snippy)
+conda snippy (conda install snippy, conda install prokka)
 
 conda R (conda install R)
 
