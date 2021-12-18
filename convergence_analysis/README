@@ -9,6 +9,6 @@ for i in all colonising-colonising colonising-invasive invasive-invasive;
 	cd ..;
 done
 
-# Generate datasets and figures using the R markdown files 3-Gene_convergence_generate_dataset.Rmd, 4-Gene_convergence_figures.Rmd, 6-Operon_convergence_generate_dataset.Rmd, 7-Operon_convergence_figures.Rmd
+# Generate datasets and figures using the R markdown files Gene_convergence_generate_dataset.Rmd, Gene_convergence_figures.Rmd, Operon_convergence_generate_dataset.Rmd, Operon_convergence_figures.Rmd
 
-# Gene set enrichment analysis (8-GSEA_ontologies_analysis.Rmd)
+# Gene set enrichment analysis (GSEA_ontologies_analysis.Rmd)
