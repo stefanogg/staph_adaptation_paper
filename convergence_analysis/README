@@ -2,6 +2,7 @@
 # Generate input files using the R markdown file 2-Gene_convergence_analysis.Rmd and 5-Operon_convergence_analysis.Rmd
 
 # Conda R environment
+# The R script gsea-auto-dfcorrected-second-time.R was written by Daniel Wilson (https://www.bdi.ox.ac.uk/Team/daniel-wilson)
 
 for i in all colonising-colonising colonising-invasive invasive-invasive;
 	do cd $i;
